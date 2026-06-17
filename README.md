@@ -76,28 +76,4 @@ The preview reflects the real screen layout:
 
 This lets someone send a quick note to the clock from a phone.
 
-## Current State
-
-The latest package is:
-
-```text
-mk-piclock-v1.5.23-final-optimization
-```
-
-It is a good freeze point.
-
-Recent improvements include:
-
-- HTTP worker limit
-- No stalled-client GUI freeze
-- Atomic config saves
-- RAM face cache
-- Cached face, music, and font lists
-- No repeated OLED heap allocation
-- Warning-clean compile
-- Cleaner route handling
-- Mobile GUI polish
-
-## Plain-Language Summary
-
-**mk-piclock** is now a stable, self-contained Raspberry Pi alarm clock appliance with a phone-friendly control panel, custom visuals, MP3 alarms, logging, and a polished screen message system.
+As you may have guessed, this project was created for my daughter.

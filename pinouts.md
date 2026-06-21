@@ -1,6 +1,6 @@
 # mk-piclock v1.6.10 Pinouts
 
-This document covers the Raspberry Pi GPIO header, SSD1322 OLED, MAX98357A I2S amplifier, speaker, and TTP223B touch sensor used by mk-piclock.
+This document covers the Raspberry Pi GPIO header, the confirmed working smaller 3.12-inch 256×64 SSD1322 OLED, MAX98357A I2S amplifier, speaker, and TTP223B touch sensor used by mk-piclock.
 
 The software uses **BCM GPIO numbering**. Physical pin numbers refer to the Raspberry Pi 40-pin header.
 
@@ -10,13 +10,13 @@ The software uses **BCM GPIO numbering**. Physical pin numbers refer to the Rasp
 | --- | --- | --- | ---: | ---: | --- |
 | External 5 V supply | +5 V | Pi 5 V input | - | 4 | Supply to Pi |
 | External 5 V supply | GND | Pi ground | - | 9 | Supply to Pi |
-| SSD1322 OLED | VCC | 3.3 V | - | 1 | Pi to OLED |
-| SSD1322 OLED | GND | Ground | - | 6 | Common ground |
-| SSD1322 OLED | DIN / MOSI / D1 | SPI0 MOSI | 10 | 19 | Pi to OLED |
-| SSD1322 OLED | CLK / SCLK / D0 | SPI0 SCLK | 11 | 23 | Pi to OLED |
-| SSD1322 OLED | CS | SPI0 CE0 | 8 | 24 | Pi to OLED |
-| SSD1322 OLED | DC / A0 | Data/command | 25 | 22 | Pi to OLED |
-| SSD1322 OLED | RST / RES | Reset | 27 | 13 | Pi to OLED |
+| SSD1322 OLED | Pin 1: VSS | Ground | - | 6 | Common ground |
+| SSD1322 OLED | Pin 2: VCC_IN | 3.3 V | - | 1 | Pi to OLED |
+| SSD1322 OLED | Pin 4: D0 / CLK | SPI0 SCLK | 11 | 23 | Pi to OLED |
+| SSD1322 OLED | Pin 5: D1 / DIN | SPI0 MOSI | 10 | 19 | Pi to OLED |
+| SSD1322 OLED | Pin 14: D/C# | Data/command | 25 | 22 | Pi to OLED |
+| SSD1322 OLED | Pin 15: RES# | Reset | 27 | 13 | Pi to OLED |
+| SSD1322 OLED | Pin 16: CS# | SPI0 CE0 | 8 | 24 | Pi to OLED |
 | MAX98357A amp | VIN | 5 V | - | 2 | Pi to amp |
 | MAX98357A amp | GND | Ground | - | 14 | Common ground |
 | MAX98357A amp | BCLK | PCM clock | 18 | 12 | Pi to amp |
@@ -64,21 +64,19 @@ Pin 1 is the 3.3 V corner pin. Confirm the header orientation before applying po
 
 ## SSD1322 OLED
 
+This exact wiring is **confirmed working** with the smaller 3.12-inch 256×64 SSD1322 module used by mk-piclock.
+
+| OLED pin | Signal | Raspberry Pi |
+| ---: | --- | --- |
+| 1 | VSS | GND, physical pin 6 |
+| 2 | VCC_IN | 3.3 V, physical pin 1 |
+| 4 | D0 / CLK | GPIO11 / SPI0 SCLK, physical pin 23 |
+| 5 | D1 / DIN | GPIO10 / SPI0 MOSI, physical pin 19 |
+| 14 | D/C# | GPIO25, physical pin 22 |
+| 15 | RES# | GPIO27, physical pin 13 |
+| 16 | CS# | GPIO8 / SPI0 CE0, physical pin 24 |
+
 The core opens `/dev/spidev0.0`, which uses SPI0 CE0.
-
-```text
-SSD1322 OLED          Raspberry Pi
------------------------------------------------
-VCC                -> 3.3 V, physical pin 1
-GND                -> GND, physical pin 6
-DIN / MOSI / D1    -> GPIO10, physical pin 19
-CLK / SCLK / D0    -> GPIO11, physical pin 23
-CS                 -> GPIO8 CE0, physical pin 24
-DC / A0            -> GPIO25, physical pin 22
-RST / RES           -> GPIO27, physical pin 13
-```
-
-OLED settings compiled into `mk-piclock.c`:
 
 ```text
 SPI device: /dev/spidev0.0
@@ -90,10 +88,14 @@ RST:        BCM GPIO27
 
 Notes:
 
+- Treat this table as the authoritative OLED pinout.
+- Do not substitute the discarded GPIO27/GPIO24 test mapping.
+- OLED pins 3 and 6 through 13 are not connected by mk-piclock.
 - The OLED does not use SPI MISO. GPIO9, physical pin 21, remains unused.
-- Connect CS to CE0. Do not tie CS low when using `/dev/spidev0.0` unless the specific module requires it and no other SPI device shares the bus.
-- SSD1322 module header order varies. Follow the signal labels printed on the module, not the position shown in a seller photograph.
-- This project wiring uses 3.3 V for the OLED. Confirm the module is configured for 4-wire SPI.
+- Connect CS to CE0. Do not tie CS low when using `/dev/spidev0.0`.
+- Follow the signal labels printed on the module. Seller photographs may show a different header orientation.
+- Power the OLED from 3.3 V.
+- The module must be configured for 4-wire SPI.
 
 ## MAX98357A I2S amplifier
 
@@ -177,7 +179,10 @@ Power the TTP223B from **3.3 V**. Do not power it from 5 V while OUT is directly
 - Do not connect USB power while the GPIO header supply is connected.
 - Confirm pin 1 orientation on the Raspberry Pi header.
 - Confirm every module shares Raspberry Pi ground.
-- Confirm the OLED VCC wire is on 3.3 V, not a GPIO.
+- Confirm OLED pin 2 is connected to 3.3 V, physical pin 1.
+- Confirm OLED pin 1 is connected to ground, physical pin 6.
+- Confirm OLED D/C# is GPIO25, physical pin 22.
+- Confirm OLED RES# is GPIO27, physical pin 13.
 - Confirm the touch sensor VCC wire is on 3.3 V.
 - Confirm the amplifier SD / EN pad is not connected.
 - Confirm amplifier DIN is connected to GPIO21, physical pin 40, and is not tied to 3.3 V.

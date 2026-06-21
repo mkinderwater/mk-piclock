@@ -1,0 +1,36 @@
+[Unit]
+Description=mk-piclock hardware and alarm core
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=mk-piclock-core
+Group=mk-piclock
+Environment=MK_PICLOCK_API_USER=mk-piclock-api
+ExecStart=/opt/mk-piclock/mk-piclock-core
+WorkingDirectory=/opt/mk-piclock
+Restart=always
+RestartSec=3
+UMask=0027
+RuntimeDirectory=mk-piclock
+RuntimeDirectoryMode=0770
+
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelLogs=true
+ProtectClock=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/opt/mk-piclock/config /run/mk-piclock
+
+# The core owns the OLED, GPIO touch input, audio and persistent clock state.
+# Its private SOCK_SEQPACKET socket is /run/mk-piclock/core.sock.
+
+[Install]
+WantedBy=multi-user.target

@@ -8,6 +8,8 @@ The software uses **BCM GPIO numbering**. Physical pin numbers refer to the Rasp
 
 | Device | Device signal | Raspberry Pi signal | BCM GPIO | Physical pin | Direction |
 | --- | --- | --- | ---: | ---: | --- |
+| External 5 V supply | +5 V | Pi 5 V input | - | 4 | Supply to Pi |
+| External 5 V supply | GND | Pi ground | - | 9 | Supply to Pi |
 | SSD1322 OLED | VCC | 3.3 V | - | 1 | Pi to OLED |
 | SSD1322 OLED | GND | Ground | - | 6 | Common ground |
 | SSD1322 OLED | DIN / MOSI / D1 | SPI0 MOSI | 10 | 19 | Pi to OLED |
@@ -20,16 +22,16 @@ The software uses **BCM GPIO numbering**. Physical pin numbers refer to the Rasp
 | MAX98357A amp | BCLK | PCM clock | 18 | 12 | Pi to amp |
 | MAX98357A amp | LRC / LRCLK / WS | PCM frame sync | 19 | 35 | Pi to amp |
 | MAX98357A amp | DIN | PCM data | 21 | 40 | Pi to amp |
-| MAX98357A amp | SD / EN | Dedicated enable output | 22 | 15 | Pi to amp |
+| MAX98357A amp | SD / EN | Not connected | - | - | Module default |
 | TTP223B touch | VCC | 3.3 V | - | 17 | Pi to sensor |
 | TTP223B touch | GND | Ground | - | 39 | Common ground |
 | TTP223B touch | OUT / SIG | Digital input | 20 | 38 | Sensor to Pi |
 | Speaker | `+` | MAX98357A `SPK+` | - | - | Amp to speaker |
 | Speaker | `-` | MAX98357A `SPK-` | - | - | Amp to speaker |
 
-The selected power and ground pins keep the wiring easy to identify. Equivalent Raspberry Pi power or ground pins may be used.
+The external regulated 5 V supply powers the Raspberry Pi through physical pin 4, with supply ground on physical pin 9. The amplifier uses physical pins 2 and 14, so no power connector is physically shared. Raspberry Pi pins 2 and 4 are still electrically connected to the same internal 5 V rail, and all ground pins are common. Do not connect USB power while the header supply is connected.
 
-The OLED and TTP223B use the Pi's two dedicated 3.3 V header pins. The MAX98357A SD / EN input is driven separately by GPIO22, physical pin 15, so no power pin is shared.
+The build has two 3.3 V consumers: OLED VCC and TTP223B VCC. They use separate Raspberry Pi header pins. Leave the MAX98357A SD / EN pad unconnected.
 
 ## Raspberry Pi 40-pin header map
 
@@ -37,13 +39,13 @@ The OLED and TTP223B use the Pi's two dedicated 3.3 V header pins. The MAX98357A
                          Raspberry Pi GPIO header
 
 OLED VCC       <- 3.3V       (1)  (2)  5V          -> MAX98357A VIN
-                              (3)  (4)  5V
+                              (3)  (4)  5V          <- EXTERNAL +5V INPUT
                               (5)  (6)  GND         -> OLED GND
                               (7)  (8)
-                 GND         (9) (10)
+EXTERNAL GND    -> GND         (9) (10)
                              (11) (12) GPIO18       -> MAX98357A BCLK
 OLED RST       <- GPIO27    (13) (14) GND          -> MAX98357A GND
-AMP SD / EN    <- GPIO22    (15) (16)
+                             (15) (16)
 TTP223B VCC    <- 3.3V      (17) (18)
 OLED MOSI      <- GPIO10    (19) (20) GND
                  GPIO9     (21) (22) GPIO25       -> OLED DC
@@ -103,7 +105,7 @@ GND                -> GND, physical pin 14
 BCLK               -> GPIO18, physical pin 12
 LRC / LRCLK / WS   -> GPIO19, physical pin 35
 DIN                -> GPIO21, physical pin 40
-SD / EN            -> GPIO22, physical pin 15
+SD / EN            -> Not connected
 ```
 
 Required `/boot/firmware/config.txt` settings:
@@ -113,7 +115,11 @@ dtparam=audio=off
 dtoverlay=max98357a,no-sdmode
 ```
 
-`no-sdmode` prevents the audio overlay from claiming an SD pin. The mk-piclock core directly controls GPIO22 through libgpiod: high while the daemon is running and low during a clean shutdown. This keeps the amplifier enable separate from both 3.3 V power pins.
+`no-sdmode` means mk-piclock does not control the amplifier SD or EN input from a GPIO. On the tested module, leaving SD / EN unconnected allows the module's onboard bias network to enable playback and select its default mono mix. Do not connect SD / EN to a Raspberry Pi GPIO or directly to 3.3 V.
+
+### Audio startup click
+
+A small click when playback starts is accepted in this release. SD / EN remains unconnected, and mk-piclock does not add amplifier switching, a persistent silence stream, or other click-suppression logic.
 
 ## Speaker
 
@@ -161,17 +167,19 @@ Power the TTP223B from **3.3 V**. Do not power it from 5 V while OUT is directly
 | 19 | 35 | MAX98357A LRC / LRCLK |
 | 20 | 38 | TTP223B OUT |
 | 21 | 40 | MAX98357A DIN |
-| 22 | 15 | MAX98357A SD / EN |
 | 25 | 22 | OLED DC |
 | 27 | 13 | OLED reset |
 
 ## Pre-power checklist
 
+- Confirm the external supply is a regulated 5 V source suitable for the Pi and amplifier load.
+- Connect external +5 V to physical pin 4 and external ground to physical pin 9.
+- Do not connect USB power while the GPIO header supply is connected.
 - Confirm pin 1 orientation on the Raspberry Pi header.
 - Confirm every module shares Raspberry Pi ground.
 - Confirm the OLED VCC wire is on 3.3 V, not a GPIO.
-- Confirm the touch sensor VCC wire is on 3.3 V, physical pin 17.
-- Confirm amplifier SD / EN is connected to GPIO22, physical pin 15.
+- Confirm the touch sensor VCC wire is on 3.3 V.
+- Confirm the amplifier SD / EN pad is not connected.
 - Confirm amplifier DIN is connected to GPIO21, physical pin 40, and is not tied to 3.3 V.
 - Confirm the speaker connects to `SPK+` and `SPK-`, not ground.
 - Check for solder bridges before applying power.

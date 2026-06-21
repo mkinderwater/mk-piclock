@@ -1,22 +1,16 @@
 /*
   mk-piclock.c
 
-  Single-file Raspberry Pi alarm clock daemon.
+  Private Raspberry Pi alarm clock core daemon.
 
   Features:
     - SSD1322 256x64 OLED over /dev/spidev0.0
-    - libgpiod GPIO for DC/RST
-    - Mobile-first built-in HTTP server
-    - Separate web HTML, CSS, and JS assets served by C
-    - PNG face upload, converted to 64x64 packed 4-bit grayscale .raw
-    - MP3 upload/play/stop using libmpg123 + ALSA PCM
-    - Web-configured alarms, fonts, faces, messages, bedtime dimming, and config file
+    - libgpiod GPIO for OLED DC/RST and TTP223B touch input
+    - Private Unix socket control service for mk-piclock-api
+    - MP3 playback using libmpg123 + ALSA PCM
+    - Alarms, fonts, faces, messages, bedtime dimming, touch input, and config
 
-  Compile:
-    gcc -Wall -Wextra -O2 $(pkg-config --cflags freetype2 alsa libmpg123) mk-piclock.c -lgpiod -lpng $(pkg-config --libs freetype2 alsa libmpg123) -pthread -o mk-piclock
-
-  Install deps:
-    sudo apt install --no-install-recommends -y build-essential pkg-config libgpiod-dev gpiod libpng-dev libfreetype-dev libasound2-dev libmpg123-dev alsa-utils
+  Build both services with the supplied Makefile.
 */
 
 #define _GNU_SOURCE
@@ -26,9 +20,8 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/spi/spidev.h>
-#include <netinet/in.h>
-#include <png.h>
 #include <poll.h>
+#include <pwd.h>
 #include <alsa/asoundlib.h>
 #include <mpg123.h>
 #include <pthread.h>
@@ -42,6 +35,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -50,8 +44,15 @@
 
 #include <gpiod.h>
 
-#define APP_NAME "mk-piclock"
-#define APP_VERSION "1.5.23"
+#include "ipc_protocol.h"
+#include "asset_format.h"
+#include "util.h"
+
+#define safe_str mp_safe_str
+#define write_all mp_write_full
+
+#define APP_NAME "mk-piclock-core"
+#define APP_VERSION "1.6.10"
 #define DEFAULT_CLOCK_NAME "Rylie"
 #define STARTUP_GREETING_SECONDS 3
 #define APP_ROOT "/opt/mk-piclock"
@@ -59,7 +60,6 @@
 #define BEDTIME_FACE_DIR APP_ROOT "/assets/bedtime-faces"
 #define MUSIC_DIR APP_ROOT "/assets/music"
 #define FONT_DIR APP_ROOT "/assets/fonts"
-#define WEB_DIR APP_ROOT "/web"
 #define CONFIG_DIR APP_ROOT "/config"
 #define CONFIG_FILE CONFIG_DIR "/clock.conf"
 #define LOG_FILE CONFIG_DIR "/event.log"
@@ -75,7 +75,6 @@
 #define OLED_FB_BYTES ((OLED_W * OLED_H) / 2)
 #define SPI_SPEED_HZ 4000000
 #define SPI_CHUNK 4096
-#define OLED_CLOCK_FULL_FLUSH 1
 
 #define MESSAGE_TEXT_X 70
 #define MESSAGE_TEXT_W (OLED_W - MESSAGE_TEXT_X - 4)
@@ -86,20 +85,21 @@
 #define MESSAGE_TTF_MIN_PX 12
 #define MESSAGE_TTF_MAX_PX 18
 #define MESSAGE_DEFAULT_DURATION_SECONDS 30
+#define MESSAGE_DELAY_MAX_SECONDS 60
 
 
 #define GPIO_CHIP "/dev/gpiochip0"
 #define GPIO_DC 25
 #define GPIO_RST 27
+#define GPIO_TOUCH 20
+#define TOUCH_POLL_MS 20u
+#define TOUCH_DEBOUNCE_MS 50u
+#define TOUCH_LONG_PRESS_MS 3000u
 
-#define FACE_W 64
-#define FACE_H 64
-#define FACE_RAW_BYTES ((FACE_W * FACE_H) / 2)
 #define FACE_COUNT 64
 #define MAX_ALARMS 7
 #define MUSIC_FILE_MAX 256
 #define FACE_FILE_MAX 128
-#define WIFI_SSID_MAX 64
 #define CLOCK_FACE_CHANGE_MAX_SECONDS 300
 #define BEDTIME_FACE_CHANGE_SECONDS 300
 #define CLOCK_TIME_Y_OFFSET -7
@@ -108,13 +108,15 @@
 #define CLOCK_SIDE_WIDGET_X 4
 #define CLOCK_FACE_PREVIEW_SECONDS 15
 #define CLOCK_STATUS_PILL_H 11
+#define SONG_METADATA_X 74
+#define SONG_METADATA_W (OLED_W - SONG_METADATA_X - 2)
+#define SONG_METADATA_TEXT_MAX (MP_ID3_TEXT_MAX * 2 + 4)
+#define SONG_SCROLL_PAUSE_MS 1250u
+#define SONG_SCROLL_SPEED_PX_PER_SEC 18u
 
 
-#define HTTP_PORT 8080
-#define HTTP_MAX_REQUEST (12 * 1024 * 1024)
-#define HTTP_SOCKET_TIMEOUT_SEC 5
-#define HTTP_ACCEPT_POLL_MS 500
-#define HTTP_MAX_WORKERS 8
+#define CORE_RUNTIME_DIR "/run/mk-piclock"
+#define CORE_SOCKET_PATH CORE_RUNTIME_DIR "/core.sock"
 #define ASSET_LIST_MAX_FILES 256
 #define ASSET_LIST_NAME_MAX MUSIC_FILE_MAX
 
@@ -130,27 +132,13 @@ static time_t g_bedtime_face_next_change = 0;
 struct face_raw_cache {
     char file[FACE_FILE_MAX];
     int bedtime;
-    uint8_t raw[FACE_RAW_BYTES];
+    uint8_t raw[MP_FACE_RAW_BYTES];
     int valid;
     unsigned long generation;
 };
 
-struct asset_list_cache {
-    pthread_mutex_t lock;
-    int valid;
-    int count;
-    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-};
-
 static pthread_mutex_t g_face_raw_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct face_raw_cache g_face_raw_cache = { .file = "", .bedtime = 0, .valid = 0, .generation = 0 };
-static struct asset_list_cache g_face_list_cache = { .lock = PTHREAD_MUTEX_INITIALIZER, .valid = 0, .count = 0 };
-static struct asset_list_cache g_bedtime_face_list_cache = { .lock = PTHREAD_MUTEX_INITIALIZER, .valid = 0, .count = 0 };
-static struct asset_list_cache g_music_list_cache = { .lock = PTHREAD_MUTEX_INITIALIZER, .valid = 0, .count = 0 };
-static struct asset_list_cache g_font_list_cache = { .lock = PTHREAD_MUTEX_INITIALIZER, .valid = 0, .count = 0 };
-
-static pthread_mutex_t g_http_worker_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_http_active_workers = 0;
 
 struct alarm_slot {
     int enabled;
@@ -165,7 +153,7 @@ struct alarm_slot {
 
 struct app_state {
     int display_mode;       /* 0 clock, 1 clear, 2 face, 3 message */
-    int display_dirty;      /* set by web thread; drawn by main OLED loop */
+    int display_dirty;      /* set by API IPC thread; drawn by main OLED loop */
     int current_face;       /* legacy numeric face */
     int message_face;       /* legacy numeric face */
     char current_face_file[FACE_FILE_MAX];
@@ -175,6 +163,10 @@ struct app_state {
     char message_face_file[FACE_FILE_MAX];
     time_t message_until;   /* unix time; 0 = no active message */
     char message_text[192];
+    int pending_message_face;
+    char pending_message_face_file[FACE_FILE_MAX];
+    char pending_message_text[192];
+    time_t pending_message_at;
     int alarm_enabled;      /* legacy compatibility, mirrors alarm 1 */
     int alarm_hour;         /* legacy compatibility, mirrors alarm 1 */
     int alarm_min;          /* legacy compatibility, mirrors alarm 1 */
@@ -191,20 +183,20 @@ struct app_state {
     int oled_brightness_current;
     int audio_playing;
     char audio_file[MUSIC_FILE_MAX];
+    char audio_title[MP_ID3_TEXT_MAX];
+    char audio_artist[MP_ID3_TEXT_MAX];
+    char audio_display[SONG_METADATA_TEXT_MAX];
+    uint64_t audio_scroll_started_ms;
+    int show_song_metadata;
     int alarm_active;             /* 1 only while an alarm MP3 is currently playing */
     int alarm_volume_percent;     /* current alarm ramp volume, 0..100 */
     struct alarm_slot alarms[MAX_ALARMS];
     int oled_ok;
-    int http_port;
     char clock_name[64];
     int oled_font;         /* 0 seven, 1 seven thin, 2 pixel, 3 pixel bold */
     char oled_font_file[128]; /* uploaded .ttf/.otf filename, empty = built-in */
     int oled_font_size;    /* TrueType pixel size */
     int clock_24h_mode;    /* 0 = 12-hour, 1 = 24-hour */
-    FT_Library ft_library;
-    FT_Face ft_face;
-    char ft_loaded_file[128];
-    int ft_loaded_size;
     pthread_mutex_t lock;
 };
 
@@ -220,6 +212,10 @@ static struct app_state g_state = {
     .message_face_file = "",
     .message_until = 0,
     .message_text = "",
+    .pending_message_face = 1,
+    .pending_message_face_file = "",
+    .pending_message_text = "",
+    .pending_message_at = 0,
     .alarm_enabled = 0,
     .alarm_hour = 7,
     .alarm_min = 0,
@@ -236,24 +232,41 @@ static struct app_state g_state = {
     .oled_brightness_current = -1,
     .audio_playing = 0,
     .audio_file = "",
+    .audio_title = "",
+    .audio_artist = "",
+    .audio_display = "",
+    .audio_scroll_started_ms = 0,
+    .show_song_metadata = 1,
     .alarm_active = 0,
     .alarm_volume_percent = 0,
     .oled_ok = 0,
-    .http_port = HTTP_PORT,
     .clock_name = DEFAULT_CLOCK_NAME,
     .oled_font = 0,
     .oled_font_file = "",
     .oled_font_size = 48,
     .clock_24h_mode = 0,
-    .ft_library = NULL,
-    .ft_face = NULL,
-    .ft_loaded_file = "",
-    .ft_loaded_size = 0,
     .lock = PTHREAD_MUTEX_INITIALIZER
+};
+
+struct font_cache_state {
+    pthread_mutex_t lock;
+    FT_Library library;
+    FT_Face face;
+    char loaded_file[128];
+    int loaded_size;
+};
+
+static struct font_cache_state g_font = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+    .library = NULL,
+    .face = NULL,
+    .loaded_file = "",
+    .loaded_size = 0
 };
 
 struct audio_player_state {
     pthread_mutex_t lock;
+    pthread_cond_t stopped;
     int running;
     int stop_requested;
     char file[MUSIC_FILE_MAX];
@@ -261,6 +274,7 @@ struct audio_player_state {
 
 static struct audio_player_state g_audio = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
+    .stopped = PTHREAD_COND_INITIALIZER,
     .running = 0,
     .stop_requested = 0,
     .file = ""
@@ -281,6 +295,22 @@ static struct oled_dev g_oled = {
     .chip = NULL,
     .gpio_req = NULL,
     .prev_valid = 0
+};
+
+struct touch_dev {
+    struct gpiod_chip *chip;
+    struct gpiod_line_request *request;
+    pthread_mutex_t lock;
+    int ready;
+    int pressed;
+};
+
+static struct touch_dev g_touch = {
+    .chip = NULL,
+    .request = NULL,
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+    .ready = 0,
+    .pressed = 0
 };
 
 static void on_signal(int sig) {
@@ -306,33 +336,52 @@ static int ensure_dir(const char *path) {
     return 0;
 }
 
-static int write_all(int fd, const void *buf, size_t len) {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (len > 0) {
-        ssize_t n = write(fd, p, len);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
+static int hex_value(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static void config_encode_to_buffer(char *out, size_t out_len, const char *in) {
+    static const char hex[] = "0123456789ABCDEF";
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!in) in = "";
+
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && j + 1 < out_len; p++) {
+        unsigned char ch = *p;
+        int plain = isalnum(ch) || ch == '.' || ch == '_' || ch == '-';
+        if (plain) {
+            out[j++] = (char)ch;
+        } else {
+            if (j + 3 >= out_len) break;
+            out[j++] = '%';
+            out[j++] = hex[(ch >> 4) & 0x0F];
+            out[j++] = hex[ch & 0x0F];
         }
-        if (n == 0) return -1;
-        p += n;
-        len -= (size_t)n;
     }
-    return 0;
+    out[j] = '\0';
 }
 
-static void safe_str(char *dst, size_t dst_len, const char *src) {
-    if (!dst || dst_len == 0) return;
-    if (!src) src = "";
-
-    size_t i = 0;
-    while (i + 1 < dst_len && src[i] != '\0') {
-        dst[i] = src[i];
-        i++;
+static void config_decode_inplace(char *s) {
+    if (!s) return;
+    char *o = s;
+    for (char *p = s; *p; p++) {
+        if (*p == '%' && p[1] && p[2]) {
+            int hi = hex_value(p[1]);
+            int lo = hex_value(p[2]);
+            if (hi >= 0 && lo >= 0) {
+                *o++ = (char)((hi << 4) | lo);
+                p += 2;
+                continue;
+            }
+        }
+        *o++ = *p;
     }
-    dst[i] = '\0';
+    *o = '\0';
 }
-
 
 static void log_trim_if_needed_locked(void) {
     struct stat st;
@@ -433,8 +482,6 @@ static void sanitize_clock_name(char *s) {
 }
 
 static int safe_asset_filename(const char *name);
-static void sanitize_asset_filename(const char *in, char *out, size_t out_len, const char *fallback);
-static int save_bytes(const char *path, const uint8_t *data, size_t len);
 
 static int face_id_valid_int(int id) {
     return id >= 1 && id <= FACE_COUNT;
@@ -443,11 +490,6 @@ static int face_id_valid_int(int id) {
 static int has_raw_ext(const char *name) {
     const char *dot = strrchr(name ? name : "", '.');
     return dot && strcasecmp(dot, ".raw") == 0;
-}
-
-static int has_png_ext(const char *name) {
-    const char *dot = strrchr(name ? name : "", '.');
-    return dot && strcasecmp(dot, ".png") == 0;
 }
 
 static int safe_face_filename(const char *name) {
@@ -470,110 +512,6 @@ static int make_bedtime_face_path_by_file(const char *file, char *out, size_t ou
     return 0;
 }
 
-static int safe_face_source_png_filename(const char *name) {
-    return safe_asset_filename(name) && has_png_ext(name);
-}
-
-static int raw_face_to_source_png_name(const char *raw_file, char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-    if (!safe_face_filename(raw_file)) return -1;
-
-    char tmp[FACE_FILE_MAX];
-    safe_str(tmp, sizeof(tmp), raw_file);
-    char *dot = strrchr(tmp, '.');
-    if (!dot || strcasecmp(dot, ".raw") != 0) return -1;
-    *dot = '\0';
-
-    if (snprintf(out, out_len, "%s.png", tmp) >= (int)out_len) return -1;
-    return safe_face_source_png_filename(out) ? 0 : -1;
-}
-
-static int make_source_face_png_path_by_raw(const char *raw_file, int bedtime, char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-
-    char png_name[FACE_FILE_MAX];
-    if (raw_face_to_source_png_name(raw_file, png_name, sizeof(png_name)) != 0) return -1;
-
-    snprintf(out, out_len, "%s/%s", bedtime ? BEDTIME_FACE_DIR : FACE_DIR, png_name);
-    return 0;
-}
-
-static int source_face_png_exists(const char *raw_file, int bedtime, char *png_name, size_t png_name_len) {
-    char path[512];
-    if (raw_face_to_source_png_name(raw_file, png_name, png_name_len) != 0) return 0;
-    if (make_source_face_png_path_by_raw(raw_file, bedtime, path, sizeof(path)) != 0) return 0;
-    return access(path, R_OK) == 0;
-}
-
-static int save_source_face_png_if_missing(const char *raw_file, int bedtime, const uint8_t *data, size_t len) {
-    char path[512];
-    if (make_source_face_png_path_by_raw(raw_file, bedtime, path, sizeof(path)) != 0) return -1;
-    if (access(path, F_OK) == 0) return 0;
-    return save_bytes(path, data, len);
-}
-
-static void face_title_from_file(const char *file, char *out, size_t out_len) {
-    if (!out || out_len == 0) return;
-    out[0] = '\0';
-    if (!file || !*file) {
-        safe_str(out, out_len, "Face");
-        return;
-    }
-
-    char tmp[FACE_FILE_MAX];
-    safe_str(tmp, sizeof(tmp), file);
-    char *dot = strrchr(tmp, '.');
-    if (dot) *dot = '\0';
-
-    size_t j = 0;
-    int cap_next = 1;
-    for (char *p = tmp; *p && j + 1 < out_len; p++) {
-        char ch = *p;
-        if (ch == '_' || ch == '-') {
-            if (j > 0 && out[j - 1] != ' ') out[j++] = ' ';
-            cap_next = 1;
-            continue;
-        }
-        if (cap_next && ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
-        out[j++] = ch;
-        cap_next = 0;
-    }
-    while (j > 0 && out[j - 1] == ' ') j--;
-    out[j] = '\0';
-    if (!out[0]) safe_str(out, out_len, "Face");
-}
-
-static void make_raw_face_filename_from_upload(const char *upload_name, char *out, size_t out_len) {
-    char clean[FACE_FILE_MAX];
-    sanitize_asset_filename(upload_name, clean, sizeof(clean), "face.png");
-
-    char *dot = strrchr(clean, '.');
-    if (dot) *dot = '\0';
-    if (!clean[0]) safe_str(clean, sizeof(clean), "face");
-
-    size_t max_base = out_len > 5 ? out_len - 5 : 0;
-    if (strlen(clean) > max_base) clean[max_base] = '\0';
-    snprintf(out, out_len, "%s.raw", clean);
-}
-
-static int parse_int_query(const char *query, const char *key, int def) {
-    if (!query || !key) return def;
-    size_t key_len = strlen(key);
-    const char *p = query;
-
-    while (*p) {
-        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=') {
-            return atoi(p + key_len + 1);
-        }
-        p = strchr(p, '&');
-        if (!p) break;
-        p++;
-    }
-    return def;
-}
-
 static int has_font_ext(const char *name) {
     const char *dot = strrchr(name ? name : "", '.');
     if (!dot) return 0;
@@ -588,29 +526,6 @@ static int safe_asset_filename(const char *name) {
         if (!(isalnum(ch) || ch == '.' || ch == '_' || ch == '-')) return 0;
     }
     return 1;
-}
-
-static void sanitize_asset_filename(const char *in, char *out, size_t out_len, const char *fallback) {
-    if (!out || out_len == 0) return;
-    out[0] = '\0';
-    if (!fallback || !*fallback) fallback = "upload.bin";
-
-    const char *base = in && *in ? in : fallback;
-    for (const char *p = base; *p; p++) {
-        if (*p == '/' || *p == '\\') base = p + 1;
-    }
-
-    size_t j = 0;
-    for (const char *p = base; *p && j + 1 < out_len; p++) {
-        unsigned char ch = (unsigned char)*p;
-        if (isalnum(ch) || ch == '.' || ch == '_' || ch == '-') out[j++] = (char)ch;
-        else out[j++] = '_';
-    }
-    out[j] = '\0';
-
-    if (!out[0] || strcmp(out, ".") == 0 || strcmp(out, "..") == 0) {
-        snprintf(out, out_len, "%s", fallback);
-    }
 }
 
 static void make_font_path(const char *file, char *out, size_t out_len) {
@@ -636,17 +551,8 @@ static void make_music_path(const char *file, char *out, size_t out_len) {
 
 enum asset_list_kind {
     ASSET_LIST_FACE_RAW = 1,
-    ASSET_LIST_MUSIC_MP3 = 2,
-    ASSET_LIST_FONT_FILE = 3
+    ASSET_LIST_MUSIC_MP3 = 2
 };
-
-static void invalidate_asset_list_cache(struct asset_list_cache *cache) {
-    if (!cache) return;
-    pthread_mutex_lock(&cache->lock);
-    cache->valid = 0;
-    cache->count = 0;
-    pthread_mutex_unlock(&cache->lock);
-}
 
 static void invalidate_face_raw_cache(void) {
     pthread_mutex_lock(&g_face_raw_cache_lock);
@@ -657,14 +563,12 @@ static void invalidate_face_raw_cache(void) {
 }
 
 static void invalidate_normal_face_assets(void) {
-    invalidate_asset_list_cache(&g_face_list_cache);
     invalidate_face_raw_cache();
     g_clock_face_cached[0] = '\0';
     g_clock_face_next_change = 0;
 }
 
 static void invalidate_bedtime_face_assets(void) {
-    invalidate_asset_list_cache(&g_bedtime_face_list_cache);
     invalidate_face_raw_cache();
     g_bedtime_face_cached[0] = '\0';
     g_bedtime_face_next_change = 0;
@@ -677,37 +581,27 @@ static void invalidate_all_face_assets(void) {
 
 static int asset_file_matches_kind(const char *dir, const char *name, int kind) {
     if (!dir || !name) return 0;
-
     if (kind == ASSET_LIST_FACE_RAW) {
         if (!safe_face_filename(name)) return 0;
         char path[512];
         snprintf(path, sizeof(path), "%s/%s", dir, name);
         struct stat st;
-        if (stat(path, &st) != 0) return 0;
-        return st.st_size == FACE_RAW_BYTES;
+        return stat(path, &st) == 0 && st.st_size == MP_FACE_RAW_BYTES;
     }
-
-    if (!safe_asset_filename(name)) return 0;
-    if (kind == ASSET_LIST_MUSIC_MP3) return has_mp3_ext(name);
-    if (kind == ASSET_LIST_FONT_FILE) return has_font_ext(name);
-    return 0;
+    return safe_asset_filename(name) && kind == ASSET_LIST_MUSIC_MP3 && has_mp3_ext(name);
 }
 
 static int scan_asset_files(const char *dir, int kind, char files[][ASSET_LIST_NAME_MAX], int max_files) {
     if (!dir || !files || max_files <= 0) return 0;
-
     DIR *d = opendir(dir);
     if (!d) return 0;
-
     int count = 0;
     struct dirent *de;
     while ((de = readdir(d)) != NULL && count < max_files) {
         if (!asset_file_matches_kind(dir, de->d_name, kind)) continue;
-        safe_str(files[count], ASSET_LIST_NAME_MAX, de->d_name);
-        count++;
+        safe_str(files[count++], ASSET_LIST_NAME_MAX, de->d_name);
     }
     closedir(d);
-
     for (int i = 0; i < count; i++) {
         for (int j = i + 1; j < count; j++) {
             if (strcasecmp(files[i], files[j]) > 0) {
@@ -718,27 +612,6 @@ static int scan_asset_files(const char *dir, int kind, char files[][ASSET_LIST_N
             }
         }
     }
-
-    return count;
-}
-
-static int collect_cached_asset_files(struct asset_list_cache *cache, const char *dir, int kind,
-                                      char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    if (!cache || !files || max_files <= 0) return 0;
-
-    pthread_mutex_lock(&cache->lock);
-    if (!cache->valid) {
-        cache->count = scan_asset_files(dir, kind, cache->files, ASSET_LIST_MAX_FILES);
-        cache->valid = 1;
-    }
-
-    int count = cache->count;
-    if (count > max_files) count = max_files;
-    for (int i = 0; i < count; i++) {
-        safe_str(files[i], ASSET_LIST_NAME_MAX, cache->files[i]);
-    }
-    pthread_mutex_unlock(&cache->lock);
-
     return count;
 }
 
@@ -772,6 +645,7 @@ static void sync_legacy_alarm_fields_locked(void) {
     X("alarm_hour", g_state.alarms[0].hour, "%02d") \
     X("alarm_min", g_state.alarms[0].min, "%02d") \
     X("global_volume", g_state.global_volume, "%d") \
+    X("show_song_metadata", g_state.show_song_metadata, "%d") \
     X("bedtime_enabled", g_state.bedtime_enabled, "%d") \
     X("bedtime_start_hour", g_state.bedtime_start_hour, "%02d") \
     X("bedtime_start_min", g_state.bedtime_start_min, "%02d") \
@@ -820,10 +694,19 @@ static void save_config(void) {
     CONFIG_ALARM_INT_FIELDS(SAVE_CONFIG_ALARM_INT)
 #undef SAVE_CONFIG_ALARM_INT
 #define SAVE_CONFIG_ALARM_STRING(idx, field_str, field, field_size) \
-    fprintf(f, "alarm%d_%s=%s\n", (idx) + 1, field_str, field);
+    do { \
+        char enc[(field_size) * 3]; \
+        config_encode_to_buffer(enc, sizeof(enc), field); \
+        fprintf(f, "alarm%d_%s=%s\n", (idx) + 1, field_str, enc); \
+    } while (0);
     CONFIG_ALARM_STRING_FIELDS(SAVE_CONFIG_ALARM_STRING)
 #undef SAVE_CONFIG_ALARM_STRING
-#define SAVE_CONFIG_STRING(cfg_key, field, field_size) fprintf(f, cfg_key "=%s\n", field);
+#define SAVE_CONFIG_STRING(cfg_key, field, field_size) \
+    do { \
+        char enc[(field_size) * 3]; \
+        config_encode_to_buffer(enc, sizeof(enc), field); \
+        fprintf(f, cfg_key "=%s\n", enc); \
+    } while (0);
     CONFIG_STRING_FIELDS(SAVE_CONFIG_STRING)
 #undef SAVE_CONFIG_STRING
     pthread_mutex_unlock(&g_state.lock);
@@ -871,7 +754,10 @@ static void load_config(void) {
         do { \
             snprintf(tmp_key, sizeof(tmp_key), "alarm%d_%s", (idx) + 1, field_str); \
             if (!matched && strcmp(key, tmp_key) == 0) { \
-                safe_str(field, field_size, val); \
+                char dec[384]; \
+                safe_str(dec, sizeof(dec), val); \
+                config_decode_inplace(dec); \
+                safe_str(field, field_size, dec); \
                 matched = 1; \
             } \
         } while (0);
@@ -890,7 +776,10 @@ static void load_config(void) {
 #define LOAD_CONFIG_STRING(cfg_key, field, field_size) \
         do { \
             if (!matched && strcmp(key, cfg_key) == 0) { \
-                safe_str(field, field_size, val); \
+                char dec[384]; \
+                safe_str(dec, sizeof(dec), val); \
+                config_decode_inplace(dec); \
+                safe_str(field, field_size, dec); \
                 matched = 1; \
             } \
         } while (0);
@@ -902,6 +791,7 @@ static void load_config(void) {
     fclose(f);
 
     g_state.global_volume = clamp_int(g_state.global_volume, 0, 100);
+    g_state.show_song_metadata = g_state.show_song_metadata ? 1 : 0;
     g_state.bedtime_enabled = g_state.bedtime_enabled ? 1 : 0;
     g_state.bedtime_start_hour = clamp_int(g_state.bedtime_start_hour, 0, 23);
     g_state.bedtime_start_min = clamp_int(g_state.bedtime_start_min, 0, 59);
@@ -1501,6 +1391,88 @@ static void draw_text5x7(int x, int y, int scale, const char *text, uint8_t c) {
     }
 }
 
+
+static uint64_t monotonic_millis(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static void oled_ascii_text(const char *input, char *output, size_t output_len) {
+    if (!output || output_len == 0) return;
+    output[0] = '\0';
+    if (!input) return;
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)input; *p && used + 1 < output_len;) {
+        if (*p < 0x80) {
+            unsigned char ch = *p++;
+            if (ch < 32 || ch == 127) ch = ' ';
+            output[used++] = (char)toupper(ch);
+            continue;
+        }
+        unsigned char first = *p++;
+        int continuation = (first & 0xe0) == 0xc0 ? 1 : (first & 0xf0) == 0xe0 ? 2 : (first & 0xf8) == 0xf0 ? 3 : 0;
+        while (continuation-- > 0 && (*p & 0xc0) == 0x80) p++;
+        output[used++] = '?';
+    }
+    output[used] = '\0';
+
+    char *src = output;
+    while (*src == ' ') src++;
+    if (src != output) memmove(output, src, strlen(src) + 1);
+    size_t len = strlen(output);
+    while (len && output[len - 1] == ' ') output[--len] = '\0';
+}
+
+static void draw_char5x7_clipped(int x, int y, char ch, uint8_t c, int clip_x0, int clip_x1) {
+    const uint8_t *glyph = font5x7_glyph(ch);
+    for (int row = 0; row < 7; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 5; col++) {
+            int px = x + col;
+            if (px < clip_x0 || px >= clip_x1) continue;
+            if (bits & (1 << (4 - col))) oled_set_px(px, y + row, c);
+        }
+    }
+}
+
+static void draw_text5x7_clipped(int x, int y, const char *text, uint8_t c, int clip_x0, int clip_x1) {
+    if (!text || clip_x1 <= clip_x0) return;
+    for (const char *p = text; *p; p++, x += 6) {
+        if (x >= clip_x1) break;
+        if (x + 5 > clip_x0) draw_char5x7_clipped(x, y, *p, c, clip_x0, clip_x1);
+    }
+}
+
+static int song_scroll_offset(int text_width, int viewport_width, uint64_t started_ms) {
+    int travel = text_width - viewport_width;
+    if (travel <= 0) return 0;
+    uint64_t travel_ms = ((uint64_t)travel * 1000u + SONG_SCROLL_SPEED_PX_PER_SEC - 1u) /
+                         SONG_SCROLL_SPEED_PX_PER_SEC;
+    uint64_t cycle = SONG_SCROLL_PAUSE_MS + travel_ms + SONG_SCROLL_PAUSE_MS + travel_ms;
+    if (cycle == 0) return 0;
+    uint64_t now_ms = monotonic_millis();
+    uint64_t elapsed = now_ms >= started_ms ? now_ms - started_ms : 0;
+    uint64_t phase = elapsed % cycle;
+    if (phase < SONG_SCROLL_PAUSE_MS) return 0;
+    phase -= SONG_SCROLL_PAUSE_MS;
+    if (phase < travel_ms) return (int)((phase * (uint64_t)travel) / travel_ms);
+    phase -= travel_ms;
+    if (phase < SONG_SCROLL_PAUSE_MS) return travel;
+    phase -= SONG_SCROLL_PAUSE_MS;
+    return travel - (int)((phase * (uint64_t)travel) / travel_ms);
+}
+
+static void draw_song_metadata_line(const char *text, uint64_t started_ms) {
+    if (!text || !*text) return;
+    int width = text5x7_width(text, 1);
+    int x = SONG_METADATA_X;
+    if (width <= SONG_METADATA_W) x += (SONG_METADATA_W - width) / 2;
+    else x -= song_scroll_offset(width, SONG_METADATA_W, started_ms);
+    draw_text5x7_clipped(x, OLED_H - 8, text, 11,
+                         SONG_METADATA_X, SONG_METADATA_X + SONG_METADATA_W);
+}
+
 static void draw_version_corner(void) {
     char ver[24];
     snprintf(ver, sizeof(ver), "v%s", APP_VERSION);
@@ -1569,27 +1541,20 @@ static int wifi_connected_kernel(void) {
     return connected;
 }
 
-static void get_wifi_ssid_cached(char *out, size_t out_len) {
+static int wifi_connected_cached(void) {
     static pthread_mutex_t wifi_lock = PTHREAD_MUTEX_INITIALIZER;
     static int cached_connected = -1;
     static time_t last_read = 0;
-
-    if (!out || out_len == 0) return;
-    out[0] = '\0';
-
     time_t now = time(NULL);
 
     pthread_mutex_lock(&wifi_lock);
-    if (cached_connected >= 0 && now - last_read < 60) {
-        safe_str(out, out_len, cached_connected ? "WIFI" : "NO WIFI");
-        pthread_mutex_unlock(&wifi_lock);
-        return;
+    if (cached_connected < 0 || now - last_read >= 60) {
+        cached_connected = wifi_connected_kernel();
+        last_read = now;
     }
-
-    cached_connected = wifi_connected_kernel();
-    last_read = now;
-    safe_str(out, out_len, cached_connected ? "WIFI" : "NO WIFI");
+    int connected = cached_connected;
     pthread_mutex_unlock(&wifi_lock);
+    return connected;
 }
 
 static void draw_wifi_icon_small(int x, int y, uint8_t c) {
@@ -1628,8 +1593,7 @@ static void draw_music_note_icon_small(int x, int y, uint8_t c) {
 }
 
 static void draw_status_pills(int alarm_on, int alarm_active, int alarm_volume_percent) {
-    char ssid[WIFI_SSID_MAX];
-    get_wifi_ssid_cached(ssid, sizeof(ssid));
+    int connected = wifi_connected_cached();
 
     const int pill_h = CLOCK_STATUS_PILL_H;
     const int pad_x = 5;
@@ -1640,7 +1604,6 @@ static void draw_status_pills(int alarm_on, int alarm_active, int alarm_volume_p
 
     /* Bottom-left status group. Wi-Fi first, alarm/music immediately to its right.
        Keeping all status pills left leaves the clock/date zone clean. */
-    int connected = (ssid[0] && strcmp(ssid, "NO WIFI") != 0);
     int wifi_x = 2;
     int wifi_y = bottom_y;
     oled_draw_pill(wifi_x, wifi_y, icon_pill_w, pill_h, connected ? 2 : 1, connected ? 8 : 5);
@@ -1729,16 +1692,27 @@ static void draw_pixel_colon(int x, int y, int sx, int sy, uint8_t c, int bold) 
 }
 
 static void font_cache_close_locked(void) {
-    if (g_state.ft_face) {
-        FT_Done_Face(g_state.ft_face);
-        g_state.ft_face = NULL;
+    if (g_font.face) {
+        FT_Done_Face(g_font.face);
+        g_font.face = NULL;
     }
-    if (g_state.ft_library) {
-        FT_Done_FreeType(g_state.ft_library);
-        g_state.ft_library = NULL;
+    if (g_font.library) {
+        FT_Done_FreeType(g_font.library);
+        g_font.library = NULL;
     }
-    g_state.ft_loaded_file[0] = '\0';
-    g_state.ft_loaded_size = 0;
+    g_font.loaded_file[0] = '\0';
+    g_font.loaded_size = 0;
+}
+
+static void font_cache_reset(void) {
+    pthread_mutex_lock(&g_font.lock);
+    if (g_font.face) {
+        FT_Done_Face(g_font.face);
+        g_font.face = NULL;
+    }
+    g_font.loaded_file[0] = '\0';
+    g_font.loaded_size = 0;
+    pthread_mutex_unlock(&g_font.lock);
 }
 
 static int font_cache_ensure_locked(const char *font_file, const char *font_path, int px_size) {
@@ -1746,41 +1720,41 @@ static int font_cache_ensure_locked(const char *font_file, const char *font_path
     if (px_size < 8) px_size = 8;
     if (px_size > 72) px_size = 72;
 
-    if (g_state.ft_face &&
-        strcmp(g_state.ft_loaded_file, font_file) == 0 &&
-        g_state.ft_loaded_size == px_size) {
+    if (g_font.face &&
+        strcmp(g_font.loaded_file, font_file) == 0 &&
+        g_font.loaded_size == px_size) {
         return 0;
     }
 
-    if (g_state.ft_face) {
-        FT_Done_Face(g_state.ft_face);
-        g_state.ft_face = NULL;
+    if (g_font.face) {
+        FT_Done_Face(g_font.face);
+        g_font.face = NULL;
     }
 
-    if (!g_state.ft_library) {
-        if (FT_Init_FreeType(&g_state.ft_library) != 0) {
-            g_state.ft_library = NULL;
+    if (!g_font.library) {
+        if (FT_Init_FreeType(&g_font.library) != 0) {
+            g_font.library = NULL;
             return -1;
         }
     }
 
-    if (FT_New_Face(g_state.ft_library, font_path, 0, &g_state.ft_face) != 0) {
-        g_state.ft_face = NULL;
-        g_state.ft_loaded_file[0] = '\0';
-        g_state.ft_loaded_size = 0;
+    if (FT_New_Face(g_font.library, font_path, 0, &g_font.face) != 0) {
+        g_font.face = NULL;
+        g_font.loaded_file[0] = '\0';
+        g_font.loaded_size = 0;
         return -1;
     }
 
-    if (FT_Set_Pixel_Sizes(g_state.ft_face, 0, (FT_UInt)px_size) != 0) {
-        FT_Done_Face(g_state.ft_face);
-        g_state.ft_face = NULL;
-        g_state.ft_loaded_file[0] = '\0';
-        g_state.ft_loaded_size = 0;
+    if (FT_Set_Pixel_Sizes(g_font.face, 0, (FT_UInt)px_size) != 0) {
+        FT_Done_Face(g_font.face);
+        g_font.face = NULL;
+        g_font.loaded_file[0] = '\0';
+        g_font.loaded_size = 0;
         return -1;
     }
 
-    safe_str(g_state.ft_loaded_file, sizeof(g_state.ft_loaded_file), font_file);
-    g_state.ft_loaded_size = px_size;
+    safe_str(g_font.loaded_file, sizeof(g_font.loaded_file), font_file);
+    g_font.loaded_size = px_size;
     return 0;
 }
 
@@ -1817,13 +1791,13 @@ static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px
     char font_path[512];
     make_font_path(font_file, font_path, sizeof(font_path));
 
-    pthread_mutex_lock(&g_state.lock);
-    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_state.ft_face) {
-        pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_lock(&g_font.lock);
+    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_font.face) {
+        pthread_mutex_unlock(&g_font.lock);
         return -1;
     }
 
-    FT_Face face = g_state.ft_face;
+    FT_Face face = g_font.face;
 
     int digit_slot = 0;
     int colon_slot = 0;
@@ -1857,7 +1831,7 @@ static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px
     }
 
     if (digit_slot <= 0 || colon_slot <= 0 || max_y <= min_y) {
-        pthread_mutex_unlock(&g_state.lock);
+        pthread_mutex_unlock(&g_font.lock);
         return -1;
     }
 
@@ -1967,7 +1941,7 @@ static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px
         slot_x += slot_w + slot_gap;
     }
 
-    pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_unlock(&g_font.lock);
     return 0;
 }
 
@@ -2043,14 +2017,70 @@ static void draw_long_date_centered_at(const struct tm *tmv, const char *font_fi
     draw_text5x7(x, OLED_H - 8, 1, upper, 9);
 }
 
+static void draw_clock_footer_contents(const struct tm *tmv, int center_x,
+                                       int alarm_on, int alarm_active, int alarm_volume_percent,
+                                       int audio_playing, int show_song_metadata,
+                                       const char *audio_display, uint64_t scroll_started_ms) {
+    if (audio_playing && show_song_metadata && audio_display && audio_display[0])
+        draw_song_metadata_line(audio_display, scroll_started_ms);
+    else
+        draw_long_date_centered_at(tmv, NULL, center_x);
+    draw_status_pills(alarm_on, alarm_active, alarm_volume_percent);
+}
+
+static int song_metadata_scroll_active(void) {
+    int active = 0;
+    pthread_mutex_lock(&g_state.lock);
+    if (g_state.audio_playing && g_state.show_song_metadata && g_state.audio_display[0])
+        active = text5x7_width(g_state.audio_display, 1) > SONG_METADATA_W;
+    pthread_mutex_unlock(&g_state.lock);
+    return active;
+}
+
+static void refresh_clock_footer(void) {
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    int alarm_on = 0;
+    int alarm_active;
+    int alarm_volume_percent;
+    int audio_playing;
+    int show_song_metadata;
+    uint64_t scroll_started_ms;
+    char audio_display[SONG_METADATA_TEXT_MAX];
+
+    pthread_mutex_lock(&g_state.lock);
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        if (g_state.alarms[i].enabled) {
+            alarm_on = 1;
+            break;
+        }
+    }
+    alarm_active = g_state.alarm_active;
+    alarm_volume_percent = g_state.alarm_volume_percent;
+    audio_playing = g_state.audio_playing;
+    show_song_metadata = g_state.show_song_metadata;
+    scroll_started_ms = g_state.audio_scroll_started_ms;
+    safe_str(audio_display, sizeof(audio_display), g_state.audio_display);
+    pthread_mutex_unlock(&g_state.lock);
+
+    oled_fill_rect(0, OLED_H - CLOCK_STATUS_PILL_H, OLED_W, CLOCK_STATUS_PILL_H, 0);
+    int clock_center_x = (CLOCK_SIDE_WIDGET_X + CLOCK_SIDE_WIDGET_SIZE + OLED_W) / 2;
+    draw_clock_footer_contents(&tmv, clock_center_x, alarm_on, alarm_active,
+                               alarm_volume_percent, audio_playing, show_song_metadata,
+                               audio_display, scroll_started_ms);
+    (void)oled_flush_region_bytes(0, OLED_ROW_BYTES - 1,
+                                  OLED_H - CLOCK_STATUS_PILL_H, OLED_H - 1);
+}
+
 static int face_raw_pixel(const uint8_t *raw, int x, int y) {
-    if (!raw || x < 0 || y < 0 || x >= FACE_W || y >= FACE_H) return 0;
-    uint8_t b = raw[(y * FACE_W + x) / 2];
+    if (!raw || x < 0 || y < 0 || x >= MP_FACE_WIDTH || y >= MP_FACE_HEIGHT) return 0;
+    uint8_t b = raw[(y * MP_FACE_WIDTH + x) / 2];
     return (x & 1) ? (b & 0x0F) : ((b >> 4) & 0x0F);
 }
 
 static int load_face_raw_uncached_by_file(const char *file, int bedtime, uint8_t *raw, size_t raw_len) {
-    if (!raw || raw_len < FACE_RAW_BYTES) return -1;
+    if (!raw || raw_len < MP_FACE_RAW_BYTES) return -1;
     char path[512];
     int ok = bedtime
         ? make_bedtime_face_path_by_file(file, path, sizeof(path))
@@ -2059,36 +2089,36 @@ static int load_face_raw_uncached_by_file(const char *file, int bedtime, uint8_t
 
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
-    size_t n = fread(raw, 1, FACE_RAW_BYTES, f);
+    size_t n = fread(raw, 1, MP_FACE_RAW_BYTES, f);
     fclose(f);
-    return n == FACE_RAW_BYTES ? 0 : -1;
+    return n == MP_FACE_RAW_BYTES ? 0 : -1;
 }
 
 static int load_face_raw_cached_by_file(const char *file, int bedtime, uint8_t *raw, size_t raw_len) {
-    if (!raw || raw_len < FACE_RAW_BYTES || !safe_face_filename(file)) return -1;
+    if (!raw || raw_len < MP_FACE_RAW_BYTES || !safe_face_filename(file)) return -1;
 
     pthread_mutex_lock(&g_face_raw_cache_lock);
     unsigned long generation = g_face_raw_cache.generation;
     if (g_face_raw_cache.valid && g_face_raw_cache.bedtime == bedtime && strcmp(g_face_raw_cache.file, file) == 0) {
-        memcpy(raw, g_face_raw_cache.raw, FACE_RAW_BYTES);
+        memcpy(raw, g_face_raw_cache.raw, MP_FACE_RAW_BYTES);
         pthread_mutex_unlock(&g_face_raw_cache_lock);
         return 0;
     }
     pthread_mutex_unlock(&g_face_raw_cache_lock);
 
-    uint8_t tmp[FACE_RAW_BYTES];
+    uint8_t tmp[MP_FACE_RAW_BYTES];
     if (load_face_raw_uncached_by_file(file, bedtime, tmp, sizeof(tmp)) != 0) return -1;
 
     pthread_mutex_lock(&g_face_raw_cache_lock);
     if (g_face_raw_cache.generation == generation) {
         safe_str(g_face_raw_cache.file, sizeof(g_face_raw_cache.file), file);
         g_face_raw_cache.bedtime = bedtime ? 1 : 0;
-        memcpy(g_face_raw_cache.raw, tmp, FACE_RAW_BYTES);
+        memcpy(g_face_raw_cache.raw, tmp, MP_FACE_RAW_BYTES);
         g_face_raw_cache.valid = 1;
     }
     pthread_mutex_unlock(&g_face_raw_cache_lock);
 
-    memcpy(raw, tmp, FACE_RAW_BYTES);
+    memcpy(raw, tmp, MP_FACE_RAW_BYTES);
     return 0;
 }
 
@@ -2101,20 +2131,17 @@ static int load_bedtime_face_raw_by_file(const char *file, uint8_t *raw, size_t 
 }
 
 static int collect_uploaded_face_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    return collect_cached_asset_files(&g_face_list_cache, FACE_DIR, ASSET_LIST_FACE_RAW, files, max_files);
+    return scan_asset_files(FACE_DIR, ASSET_LIST_FACE_RAW, files, max_files);
 }
 
 static int collect_bedtime_face_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    return collect_cached_asset_files(&g_bedtime_face_list_cache, BEDTIME_FACE_DIR, ASSET_LIST_FACE_RAW, files, max_files);
+    return scan_asset_files(BEDTIME_FACE_DIR, ASSET_LIST_FACE_RAW, files, max_files);
 }
 
 static int collect_music_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    return collect_cached_asset_files(&g_music_list_cache, MUSIC_DIR, ASSET_LIST_MUSIC_MP3, files, max_files);
+    return scan_asset_files(MUSIC_DIR, ASSET_LIST_MUSIC_MP3, files, max_files);
 }
 
-static int collect_font_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    return collect_cached_asset_files(&g_font_list_cache, FONT_DIR, ASSET_LIST_FONT_FILE, files, max_files);
-}
 
 static int random_uploaded_face_file(char *out, size_t out_len) {
     char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
@@ -2139,7 +2166,7 @@ static int sticky_clock_face_file(char *out, size_t out_len) {
     out[0] = '\0';
 
     if (g_clock_face_cached[0] && now < g_clock_face_next_change) {
-        uint8_t test[FACE_RAW_BYTES];
+        uint8_t test[MP_FACE_RAW_BYTES];
         if (load_face_raw_by_file(g_clock_face_cached, test, sizeof(test)) == 0) {
             safe_str(out, out_len, g_clock_face_cached);
             return 0;
@@ -2164,7 +2191,7 @@ static int sticky_bedtime_face_file(char *out, size_t out_len) {
     out[0] = '\0';
 
     if (g_bedtime_face_cached[0] && now < g_bedtime_face_next_change) {
-        uint8_t test[FACE_RAW_BYTES];
+        uint8_t test[MP_FACE_RAW_BYTES];
         if (load_bedtime_face_raw_by_file(g_bedtime_face_cached, test, sizeof(test)) == 0) {
             safe_str(out, out_len, g_bedtime_face_cached);
             return 0;
@@ -2192,9 +2219,9 @@ static int draw_face_thumb_raw(const uint8_t *raw, int ox, int oy, int size) {
     if (!raw || size <= 0) return -1;
 
     for (int y = 0; y < size; y++) {
-        int sy = (y * FACE_H) / size;
+        int sy = (y * MP_FACE_HEIGHT) / size;
         for (int x = 0; x < size; x++) {
-            int sx = (x * FACE_W) / size;
+            int sx = (x * MP_FACE_WIDTH) / size;
             oled_set_px(ox + x, oy + y, (uint8_t)face_raw_pixel(raw, sx, sy));
         }
     }
@@ -2203,13 +2230,13 @@ static int draw_face_thumb_raw(const uint8_t *raw, int ox, int oy, int size) {
 }
 
 static int draw_face_thumb_by_file(const char *file, int ox, int oy, int size) {
-    uint8_t raw[FACE_RAW_BYTES];
+    uint8_t raw[MP_FACE_RAW_BYTES];
     if (load_face_raw_by_file(file, raw, sizeof(raw)) != 0) return -1;
     return draw_face_thumb_raw(raw, ox, oy, size);
 }
 
 static int draw_bedtime_face_thumb_by_file(const char *file, int ox, int oy, int size) {
-    uint8_t raw[FACE_RAW_BYTES];
+    uint8_t raw[MP_FACE_RAW_BYTES];
     if (load_bedtime_face_raw_by_file(file, raw, sizeof(raw)) != 0) return -1;
     return draw_face_thumb_raw(raw, ox, oy, size);
 }
@@ -2235,6 +2262,11 @@ static void draw_clock_screen(void) {
     int oled_font = g_state.oled_font;
     int alarm_active = g_state.alarm_active;
     int alarm_volume_percent = g_state.alarm_volume_percent;
+    int audio_playing = g_state.audio_playing;
+    int show_song_metadata = g_state.show_song_metadata;
+    uint64_t audio_scroll_started_ms = g_state.audio_scroll_started_ms;
+    char audio_display[SONG_METADATA_TEXT_MAX];
+    safe_str(audio_display, sizeof(audio_display), g_state.audio_display);
     clock_24h_mode = g_state.clock_24h_mode;
     char preview_face_file[FACE_FILE_MAX];
     int preview_face_bedtime = g_state.preview_face_bedtime;
@@ -2342,31 +2374,28 @@ static void draw_clock_screen(void) {
         draw_seg_digit(x, y, w, h, t, m2, 15);
     }
 
-    draw_long_date_centered_at(&tmv, oled_font_file, clock_center_x);
-    draw_status_pills(alarm_on, alarm_active, alarm_volume_percent);
+    draw_clock_footer_contents(&tmv, clock_center_x, alarm_on, alarm_active,
+                               alarm_volume_percent, audio_playing, show_song_metadata,
+                               audio_display, audio_scroll_started_ms);
 
     /*
        The clock screen contains a 54x54 face beside the time, a blinking colon, bottom-left Wi-Fi/alarm status group. On SSD1322 modules,
        small partial updates around packed 4-bit graphics can occasionally leave
        edge noise, so a full flush is the cleaner and safer choice.
     */
-#if OLED_CLOCK_FULL_FLUSH
-    oled_flush_full();
-#else
-    oled_flush();
-#endif
+oled_flush_full();
 }
 
 static int draw_face_screen_file(const char *file) {
-    uint8_t raw[FACE_RAW_BYTES];
+    uint8_t raw[MP_FACE_RAW_BYTES];
     if (load_face_raw_by_file(file, raw, sizeof(raw)) != 0) return -1;
 
     oled_clear_fb(0);
     int ox = 96;
     int oy = 0;
-    for (int y = 0; y < FACE_H; y++) {
-        for (int x = 0; x < FACE_W; x += 2) {
-            uint8_t b = raw[(y * FACE_W + x) / 2];
+    for (int y = 0; y < MP_FACE_HEIGHT; y++) {
+        for (int x = 0; x < MP_FACE_WIDTH; x += 2) {
+            uint8_t b = raw[(y * MP_FACE_WIDTH + x) / 2];
             oled_set_px(ox + x, oy + y, (b >> 4) & 0x0F);
             oled_set_px(ox + x + 1, oy + y, b & 0x0F);
         }
@@ -2436,13 +2465,13 @@ static int ttf_message_metrics_cached(const char *font_file, int px_size, int *a
     char font_path[512];
     make_font_path(font_file, font_path, sizeof(font_path));
 
-    pthread_mutex_lock(&g_state.lock);
-    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_state.ft_face) {
-        pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_lock(&g_font.lock);
+    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_font.face) {
+        pthread_mutex_unlock(&g_font.lock);
         return -1;
     }
 
-    FT_Face face = g_state.ft_face;
+    FT_Face face = g_font.face;
     int a = 0;
     int d = 0;
     const char *sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:;!?()-_";
@@ -2454,7 +2483,7 @@ static int ttf_message_metrics_cached(const char *font_file, int px_size, int *a
         if (top > a) a = top;
         if (bottom > d) d = bottom;
     }
-    pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_unlock(&g_font.lock);
 
     if (a <= 0) a = px_size;
     if (d < 0) d = 0;
@@ -2469,13 +2498,13 @@ static int draw_truetype_line_cached_baseline(const char *font_file, int px_size
     char font_path[512];
     make_font_path(font_file, font_path, sizeof(font_path));
 
-    pthread_mutex_lock(&g_state.lock);
-    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_state.ft_face) {
-        pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_lock(&g_font.lock);
+    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_font.face) {
+        pthread_mutex_unlock(&g_font.lock);
         return -1;
     }
 
-    FT_Face face = g_state.ft_face;
+    FT_Face face = g_font.face;
     int pen_x = 0;
     int min_x = 99999;
 
@@ -2488,7 +2517,7 @@ static int draw_truetype_line_cached_baseline(const char *font_file, int px_size
     }
 
     if (min_x == 99999) {
-        pthread_mutex_unlock(&g_state.lock);
+        pthread_mutex_unlock(&g_font.lock);
         return -1;
     }
 
@@ -2516,7 +2545,7 @@ static int draw_truetype_line_cached_baseline(const char *font_file, int px_size
         pen_x += (int)g->advance.x;
     }
 
-    pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_unlock(&g_font.lock);
     return 0;
 }
 
@@ -2526,13 +2555,13 @@ static int ttf_line_width_cached(const char *font_file, int px_size, const char 
     char font_path[512];
     make_font_path(font_file, font_path, sizeof(font_path));
 
-    pthread_mutex_lock(&g_state.lock);
-    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_state.ft_face) {
-        pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_lock(&g_font.lock);
+    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_font.face) {
+        pthread_mutex_unlock(&g_font.lock);
         return 0;
     }
-    int w = measure_ttf_line_locked(g_state.ft_face, text);
-    pthread_mutex_unlock(&g_state.lock);
+    int w = measure_ttf_line_locked(g_font.face, text);
+    pthread_mutex_unlock(&g_font.lock);
     return w;
 }
 
@@ -2737,87 +2766,6 @@ static int draw_message_screen(int face_id, const char *message) {
     return draw_message_screen_file(file, message);
 }
 
-/* ---------------- PNG to raw face ---------------- */
-
-static int save_face_raw_from_png_memory(const uint8_t *png_data, size_t png_size, const char *out_path) {
-    png_image image;
-    memset(&image, 0, sizeof(image));
-    image.version = PNG_IMAGE_VERSION;
-
-    if (!png_image_begin_read_from_memory(&image, png_data, png_size)) {
-        fprintf(stderr, "png read failed: %s\n", image.message);
-        return -1;
-    }
-
-    image.format = PNG_FORMAT_RGBA;
-    size_t stride = PNG_IMAGE_ROW_STRIDE(image);
-    size_t buf_size = PNG_IMAGE_SIZE(image);
-    uint8_t *rgba = malloc(buf_size);
-    if (!rgba) {
-        png_image_free(&image);
-        return -1;
-    }
-
-    if (!png_image_finish_read(&image, NULL, rgba, 0, NULL)) {
-        fprintf(stderr, "png finish failed: %s\n", image.message);
-        free(rgba);
-        png_image_free(&image);
-        return -1;
-    }
-
-    int src_w = (int)image.width;
-    int src_h = (int)image.height;
-    int crop = src_w < src_h ? src_w : src_h;
-    int crop_x = (src_w - crop) / 2;
-    int crop_y = (src_h - crop) / 2;
-
-    uint8_t raw[FACE_RAW_BYTES];
-    memset(raw, 0, sizeof(raw));
-
-    for (int y = 0; y < FACE_H; y++) {
-        for (int x = 0; x < FACE_W; x += 2) {
-            uint8_t packed = 0;
-            for (int p = 0; p < 2; p++) {
-                int dx = x + p;
-                int sx = crop_x + (dx * crop) / FACE_W;
-                int sy = crop_y + (y * crop) / FACE_H;
-                uint8_t *px = rgba + ((size_t)sy * stride) + ((size_t)sx * 4);
-
-                int r = px[0];
-                int g = px[1];
-                int b = px[2];
-                int a = px[3];
-
-                r = (r * a + 128) >> 8;
-                g = (g * a + 128) >> 8;
-                b = (b * a + 128) >> 8;
-
-                int gray = (r * 77 + g * 150 + b * 29) >> 8;
-                int g4 = gray >> 4;
-
-                if (p == 0) packed |= (uint8_t)((g4 & 0x0F) << 4);
-                else packed |= (uint8_t)(g4 & 0x0F);
-            }
-            raw[(y * FACE_W + x) / 2] = packed;
-        }
-    }
-
-    FILE *f = fopen(out_path, "wb");
-    if (!f) {
-        perror("fopen face raw");
-        free(rgba);
-        png_image_free(&image);
-        return -1;
-    }
-    size_t written = fwrite(raw, 1, sizeof(raw), f);
-    fclose(f);
-
-    free(rgba);
-    png_image_free(&image);
-
-    return written == sizeof(raw) ? 0 : -1;
-}
-
 /* ---------------- Audio ---------------- */
 
 struct audio_play_request {
@@ -2906,6 +2854,8 @@ static int audio_write_pcm(snd_pcm_t *pcm, unsigned char *buf, size_t bytes, int
     }
     return 0;
 }
+
+static void clear_audio_metadata_locked(void);
 
 static void *audio_thread_main(void *arg) {
     struct audio_play_request *req = (struct audio_play_request *)arg;
@@ -3027,50 +2977,121 @@ done:
         mpg123_delete(mh);
     }
 
-    pthread_mutex_lock(&g_audio.lock);
-    g_audio.running = 0;
-    g_audio.stop_requested = 0;
-    g_audio.file[0] = '\0';
-    pthread_mutex_unlock(&g_audio.lock);
-
     if (req->use_ramp) alarm_volume_state_set(0, 0);
 
     pthread_mutex_lock(&g_state.lock);
     g_state.audio_playing = 0;
     g_state.audio_file[0] = '\0';
+    clear_audio_metadata_locked();
+    g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
+
+    /* Publish completion only after all old playback state is cleared.
+       A waiting replacement track can then start without the exiting thread
+       erasing the new track's metadata. */
+    pthread_mutex_lock(&g_audio.lock);
+    g_audio.running = 0;
+    g_audio.stop_requested = 0;
+    g_audio.file[0] = '\0';
+    pthread_cond_broadcast(&g_audio.stopped);
+    pthread_mutex_unlock(&g_audio.lock);
 
     free(req);
     return NULL;
 }
 
-static void audio_stop(void) {
-    int was_running;
+static void song_metadata_for_file(const char *path, const char *file,
+                                   char *title, size_t title_len,
+                                   char *artist, size_t artist_len,
+                                   char *display, size_t display_len) {
+    struct mp_id3_metadata metadata;
+    memset(&metadata, 0, sizeof(metadata));
+    (void)mp_read_id3_metadata(path, &metadata);
+    if (!metadata.title[0]) mp_title_from_filename(file, metadata.title, sizeof(metadata.title));
+    safe_str(title, title_len, metadata.title);
+    safe_str(artist, artist_len, metadata.artist);
 
-    pthread_mutex_lock(&g_audio.lock);
-    was_running = g_audio.running;
-    if (was_running) g_audio.stop_requested = 1;
-    pthread_mutex_unlock(&g_audio.lock);
+    char combined[MP_ID3_TEXT_MAX * 2 + 4];
+    if (metadata.title[0] && metadata.artist[0])
+        snprintf(combined, sizeof(combined), "%s - %s", metadata.title, metadata.artist);
+    else if (metadata.title[0])
+        safe_str(combined, sizeof(combined), metadata.title);
+    else if (metadata.artist[0])
+        safe_str(combined, sizeof(combined), metadata.artist);
+    else
+        mp_title_from_filename(file, combined, sizeof(combined));
+    oled_ascii_text(combined, display, display_len);
+}
 
-    for (int i = 0; i < 300; i++) {
-        pthread_mutex_lock(&g_audio.lock);
-        was_running = g_audio.running;
-        pthread_mutex_unlock(&g_audio.lock);
-        if (!was_running) break;
-        usleep(10000);
-    }
+static void clear_audio_metadata_locked(void) {
+    g_state.audio_title[0] = '\0';
+    g_state.audio_artist[0] = '\0';
+    g_state.audio_display[0] = '\0';
+    g_state.audio_scroll_started_ms = 0;
+}
 
+static void audio_clear_visible_state(void) {
     alarm_volume_state_set(0, 0);
 
     pthread_mutex_lock(&g_state.lock);
     g_state.audio_playing = 0;
     g_state.audio_file[0] = '\0';
+    clear_audio_metadata_locked();
+    g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
+}
+
+static void audio_request_stop(void) {
+    pthread_mutex_lock(&g_audio.lock);
+    if (g_audio.running) g_audio.stop_requested = 1;
+    pthread_mutex_unlock(&g_audio.lock);
+    audio_clear_visible_state();
+}
+
+static int audio_wait_stopped(unsigned int timeout_ms) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += (time_t)(timeout_ms / 1000u);
+    deadline.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&g_audio.lock);
+    int wait_rc = 0;
+    while (g_audio.running) {
+        wait_rc = pthread_cond_timedwait(&g_audio.stopped, &g_audio.lock, &deadline);
+        if (wait_rc == ETIMEDOUT || wait_rc != 0) break;
+    }
+    int stopped = !g_audio.running;
+    pthread_mutex_unlock(&g_audio.lock);
+    return stopped ? 0 : -1;
+}
+
+/*
+ * Request-only stop for latency-sensitive callers such as IPC and touch.
+ * The decoder thread publishes completion through g_audio.stopped.
+ */
+static void audio_stop(void) {
+    audio_request_stop();
+}
+
+/*
+ * Use only where the caller must know the old decoder has exited before it
+ * can safely continue, such as track replacement and daemon shutdown.
+ */
+static int audio_stop_and_wait(unsigned int timeout_ms) {
+    audio_request_stop();
+    return audio_wait_stopped(timeout_ms);
 }
 
 static void audio_play_music_file(const char *music_file, int start_volume, int end_volume, int use_ramp) {
     char safe_file[MUSIC_FILE_MAX];
     char path[512];
+    char song_title[MP_ID3_TEXT_MAX];
+    char song_artist[MP_ID3_TEXT_MAX];
+    char song_display[SONG_METADATA_TEXT_MAX];
     int global_volume;
 
     safe_file[0] = '\0';
@@ -3082,6 +3103,10 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
 
     make_music_path(safe_file, path, sizeof(path));
     if (access(path, R_OK) != 0) return;
+    song_metadata_for_file(path, safe_file,
+                           song_title, sizeof(song_title),
+                           song_artist, sizeof(song_artist),
+                           song_display, sizeof(song_display));
 
     start_volume = clamp_int(start_volume, 0, 100);
     end_volume = clamp_int(end_volume, 0, 100);
@@ -3101,12 +3126,7 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
         end_volume = global_volume;
     }
 
-    audio_stop();
-
-    pthread_mutex_lock(&g_audio.lock);
-    int still_running = g_audio.running;
-    pthread_mutex_unlock(&g_audio.lock);
-    if (still_running) return;
+    if (audio_stop_and_wait(3000u) != 0) return;
 
     struct audio_play_request *req = calloc(1, sizeof(*req));
     if (!req) return;
@@ -3122,105 +3142,203 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
     safe_str(g_audio.file, sizeof(g_audio.file), safe_file);
     pthread_mutex_unlock(&g_audio.lock);
 
+    pthread_mutex_lock(&g_state.lock);
+    g_state.audio_playing = 1;
+    safe_str(g_state.audio_file, sizeof(g_state.audio_file), safe_file);
+    safe_str(g_state.audio_title, sizeof(g_state.audio_title), song_title);
+    safe_str(g_state.audio_artist, sizeof(g_state.audio_artist), song_artist);
+    safe_str(g_state.audio_display, sizeof(g_state.audio_display), song_display);
+    g_state.audio_scroll_started_ms = monotonic_millis();
+    /* Every playback path uses this function. Return to the clock so enabled
+       Title - Artist metadata is visible for alarms, GUI/API play, and touch. */
+    if (g_state.show_song_metadata) g_state.display_mode = 0;
+    g_state.display_dirty = 1;
+    pthread_mutex_unlock(&g_state.lock);
+
     pthread_t tid;
     if (pthread_create(&tid, NULL, audio_thread_main, req) != 0) {
         pthread_mutex_lock(&g_audio.lock);
         g_audio.running = 0;
         g_audio.stop_requested = 0;
         g_audio.file[0] = '\0';
+        pthread_cond_broadcast(&g_audio.stopped);
         pthread_mutex_unlock(&g_audio.lock);
+        pthread_mutex_lock(&g_state.lock);
+        g_state.audio_playing = 0;
+        g_state.audio_file[0] = '\0';
+        clear_audio_metadata_locked();
+        g_state.display_dirty = 1;
+        pthread_mutex_unlock(&g_state.lock);
         free(req);
         return;
     }
     pthread_detach(tid);
 
+}
+
+/* ---------------- TTP223B touch input ---------------- */
+
+static void touch_set_state(int ready, int pressed) {
+    pthread_mutex_lock(&g_touch.lock);
+    g_touch.ready = ready ? 1 : 0;
+    g_touch.pressed = pressed ? 1 : 0;
+    pthread_mutex_unlock(&g_touch.lock);
+}
+
+static void touch_get_state(int *ready, int *pressed) {
+    pthread_mutex_lock(&g_touch.lock);
+    if (ready) *ready = g_touch.ready;
+    if (pressed) *pressed = g_touch.pressed;
+    pthread_mutex_unlock(&g_touch.lock);
+}
+
+static int touch_read_active(void) {
+    if (!g_touch.request) return -1;
+    enum gpiod_line_value value =
+        gpiod_line_request_get_value(g_touch.request, GPIO_TOUCH);
+    if (value == GPIOD_LINE_VALUE_ACTIVE) return 1;
+    if (value == GPIOD_LINE_VALUE_INACTIVE) return 0;
+    return -1;
+}
+
+static int touch_init(void) {
+    struct gpiod_line_settings *settings = NULL;
+    struct gpiod_line_config *line_cfg = NULL;
+    struct gpiod_request_config *req_cfg = NULL;
+    unsigned int offset = GPIO_TOUCH;
+    int rc = -1;
+
+    g_touch.chip = gpiod_chip_open(GPIO_CHIP);
+    if (!g_touch.chip) {
+        perror("touch gpiod_chip_open");
+        return -1;
+    }
+
+    settings = gpiod_line_settings_new();
+    line_cfg = gpiod_line_config_new();
+    req_cfg = gpiod_request_config_new();
+    if (!settings || !line_cfg || !req_cfg) {
+        fprintf(stderr, "failed to allocate touch GPIO request config\n");
+        goto done;
+    }
+
+    gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
+    if (gpiod_line_config_add_line_settings(line_cfg, &offset, 1, settings) != 0) {
+        perror("touch gpiod_line_config_add_line_settings");
+        goto done;
+    }
+
+    gpiod_request_config_set_consumer(req_cfg, APP_NAME "-touch");
+    g_touch.request = gpiod_chip_request_lines(g_touch.chip, req_cfg, line_cfg);
+    if (!g_touch.request) {
+        perror("touch gpiod_chip_request_lines");
+        goto done;
+    }
+
+    int initial = touch_read_active();
+    if (initial < 0) {
+        perror("touch gpiod_line_request_get_value");
+        goto done;
+    }
+
+    touch_set_state(1, initial);
+    rc = 0;
+
+done:
+    if (settings) gpiod_line_settings_free(settings);
+    if (line_cfg) gpiod_line_config_free(line_cfg);
+    if (req_cfg) gpiod_request_config_free(req_cfg);
+    if (rc != 0) {
+        if (g_touch.request) {
+            gpiod_line_request_release(g_touch.request);
+            g_touch.request = NULL;
+        }
+        if (g_touch.chip) {
+            gpiod_chip_close(g_touch.chip);
+            g_touch.chip = NULL;
+        }
+        touch_set_state(0, 0);
+    }
+    return rc;
+}
+
+static void touch_close(void) {
+    touch_set_state(0, 0);
+    if (g_touch.request) {
+        gpiod_line_request_release(g_touch.request);
+        g_touch.request = NULL;
+    }
+    if (g_touch.chip) {
+        gpiod_chip_close(g_touch.chip);
+        g_touch.chip = NULL;
+    }
+}
+
+static int audio_is_playing(void) {
+    int playing;
     pthread_mutex_lock(&g_state.lock);
-    g_state.audio_playing = 1;
-    safe_str(g_state.audio_file, sizeof(g_state.audio_file), safe_file);
+    playing = g_state.audio_playing;
     pthread_mutex_unlock(&g_state.lock);
+    return playing;
 }
 
-/* ---------------- HTTP helpers ---------------- */
+static void *touch_thread_main(void *arg) {
+    (void)arg;
+    int raw = touch_read_active();
+    if (raw < 0) raw = 0;
+    int last_raw = raw;
+    int stable = raw;
+    int long_press_fired = 0;
+    uint64_t now_ms = monotonic_millis();
+    uint64_t raw_changed_ms = now_ms;
+    uint64_t pressed_ms = stable ? now_ms : 0;
+    touch_set_state(1, stable);
 
-static void http_send(int client, const char *status, const char *ctype, const char *body) {
-    char hdr[512];
-    size_t len = body ? strlen(body) : 0;
-    int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 %s\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-store\r\n"
-        "\r\n",
-        status, ctype, len);
-    write_all(client, hdr, (size_t)n);
-    if (body && len) write_all(client, body, len);
-}
+    while (g_running) {
+        usleep(TOUCH_POLL_MS * 1000u);
+        int current = touch_read_active();
+        if (current < 0) continue;
+        now_ms = monotonic_millis();
 
-static void http_redirect(int client, const char *path) {
-    char hdr[512];
-    int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 303 See Other\r\n"
-        "Location: %s\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: close\r\n"
-        "\r\n", path);
-    write_all(client, hdr, (size_t)n);
-}
+        if (current != last_raw) {
+            last_raw = current;
+            raw_changed_ms = now_ms;
+        }
 
+        if (current != stable && now_ms - raw_changed_ms >= TOUCH_DEBOUNCE_MS) {
+            stable = current;
+            touch_set_state(1, stable);
+            if (stable) {
+                pressed_ms = now_ms;
+                long_press_fired = 0;
+            } else {
+                if (!long_press_fired && audio_is_playing()) {
+                    app_log("touch", "Short press requested audio stop");
+                    audio_request_stop();
+                }
+                pressed_ms = 0;
+            }
+        }
 
-static void http_send_file(int client, const char *path, const char *ctype) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        http_send(client, "404 Not Found", "text/plain", "File not found");
-        return;
+        if (stable && !long_press_fired &&
+            now_ms - pressed_ms >= TOUCH_LONG_PRESS_MS) {
+            long_press_fired = 1;
+            app_log("touch", "Long press requested random music");
+            audio_play_music_file("", 0, 0, 0);
+        }
     }
 
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        http_send(client, "500 Internal Server Error", "text/plain", "Could not read file");
-        return;
-    }
-
-    long size = ftell(f);
-    if (size < 0) {
-        fclose(f);
-        http_send(client, "500 Internal Server Error", "text/plain", "Could not read file size");
-        return;
-    }
-    rewind(f);
-
-    char hdr[512];
-    int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %ld\r\n"
-        "Connection: close\r\n"
-        "Cache-Control: no-store\r\n"
-        "\r\n",
-        ctype, size);
-    write_all(client, hdr, (size_t)n);
-
-    char buf[4096];
-    while (!feof(f)) {
-        size_t got = fread(buf, 1, sizeof(buf), f);
-        if (got > 0) write_all(client, buf, got);
-        if (ferror(f)) break;
-    }
-
-    fclose(f);
+    touch_set_state(0, 0);
+    return NULL;
 }
 
-static void http_send_json(int client, const char *body) {
-    http_send(client, "200 OK", "application/json; charset=utf-8", body ? body : "{}");
-}
+/* ---------------- Private binary IPC ---------------- */
 
 static const char *oled_font_name_for_id(int id) {
     switch (id) {
         case 1: return "Seven Thin";
         case 2: return "Pixel";
         case 3: return "Pixel Bold";
-        case 0:
         default: return "Seven Segment";
     }
 }
@@ -3230,104 +3348,44 @@ static const char *display_mode_name(int mode) {
         case 1: return "clear";
         case 2: return "face";
         case 3: return "message";
-        case 0:
         default: return "clock";
     }
 }
 
-static void json_append_escaped(char *buf, size_t cap, const char *sval) {
-    if (!buf || cap == 0) return;
-    size_t used = strlen(buf);
-    if (used >= cap) return;
-
-    if (!sval) sval = "";
-    for (const unsigned char *p = (const unsigned char *)sval; *p && used + 8 < cap; p++) {
-        unsigned char ch = *p;
-        if (ch == '"' || ch == '\\') {
-            buf[used++] = '\\';
-            buf[used++] = (char)ch;
-        } else if (ch == '\n') {
-            buf[used++] = '\\';
-            buf[used++] = 'n';
-        } else if (ch == '\r') {
-            buf[used++] = '\\';
-            buf[used++] = 'r';
-        } else if (ch == '\t') {
-            buf[used++] = '\\';
-            buf[used++] = 't';
-        } else if (ch < 32) {
-            int n = snprintf(buf + used, cap - used, "\\u%04x", ch);
-            if (n < 0) break;
-            used += (size_t)n;
-        } else {
-            buf[used++] = (char)ch;
-        }
-        buf[used] = '\0';
-    }
+static int ipc_send_response(int client, unsigned int status, unsigned int content_type,
+                             const void *body, size_t body_len) {
+    if (body_len > MP_IPC_MAX_PAYLOAD) return -1;
+    struct mp_ipc_response_header header = {
+        .magic = MP_IPC_MAGIC,
+        .version = MP_IPC_VERSION,
+        .status = (uint16_t)status,
+        .body_len = (uint32_t)body_len,
+        .content_type = (uint16_t)content_type,
+        .reserved = 0
+    };
+    return mp_send_packet(client, &header, sizeof(header), body, body_len);
 }
 
-static void json_escape_to_buffer(char *out, size_t cap, const char *sval) {
-    if (!out || cap == 0) return;
-    out[0] = '\0';
-    json_append_escaped(out, cap, sval);
+static int ipc_send_json(int client, unsigned int status, const char *json) {
+    const char *body = json ? json : "{}";
+    return ipc_send_response(client, status, MP_IPC_CONTENT_JSON, body, strlen(body));
 }
 
-static void json_append(char *buf, size_t cap, const char *fmt, ...) {
-    size_t used = strlen(buf);
-    if (used >= cap) return;
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf + used, cap - used, fmt, ap);
-    va_end(ap);
+static int ipc_send_builder(int client, unsigned int status, struct mp_buffer *buffer) {
+    size_t length = 0;
+    char *body = mp_buffer_steal(buffer, &length);
+    mp_buffer_free(buffer);
+    if (!body) return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"JSON response exceeded its limit\"}");
+    int rc = ipc_send_response(client, status, MP_IPC_CONTENT_JSON, body, length);
+    free(body);
+    return rc;
 }
 
-
-static void url_decode_inplace(char *s);
-
-static int parse_string_query(const char *query, const char *key, char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-    if (!query || !key || !*key) return -1;
-
-    const char *p = query;
-    while (*p) {
-        const char *amp = strchr(p, '&');
-        size_t pair_len = amp ? (size_t)(amp - p) : strlen(p);
-        const char *eq = memchr(p, '=', pair_len);
-
-        if (eq) {
-            size_t key_len = (size_t)(eq - p);
-            char decoded_key[96];
-            if (key_len < sizeof(decoded_key)) {
-                memcpy(decoded_key, p, key_len);
-                decoded_key[key_len] = '\0';
-                url_decode_inplace(decoded_key);
-
-                if (strcmp(decoded_key, key) == 0) {
-                    size_t val_len = pair_len - key_len - 1;
-                    size_t copy_len = val_len < out_len - 1 ? val_len : out_len - 1;
-                    memcpy(out, eq + 1, copy_len);
-                    out[copy_len] = '\0';
-                    url_decode_inplace(out);
-                    return 0;
-                }
-            }
-        }
-
-        if (!amp) break;
-        p = amp + 1;
-    }
-
-    return -1;
+static int ipc_bad_payload(int client) {
+    return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid IPC payload\"}");
 }
 
-static void send_static_page(int client, const char *name) {
-    char path[512];
-    snprintf(path, sizeof(path), WEB_DIR "/%s", name);
-    http_send_file(client, path, "text/html; charset=utf-8");
-}
-
-static void send_status_json(int client) {
+static int ipc_status(int client) {
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
@@ -3337,11 +3395,7 @@ static void send_status_json(int client) {
     strftime(timestr, sizeof(timestr), "%I:%M %p", &tmv);
     if (timestr[0] == '0') memmove(timestr, timestr + 1, strlen(timestr));
     strftime(datestr, sizeof(datestr), "%A %B %e, %Y", &tmv);
-
-    long uptime_seconds = 0;
-    if (g_start_time > 0 && now >= g_start_time) {
-        uptime_seconds = (long)(now - g_start_time);
-    }
+    long uptime_seconds = (g_start_time > 0 && now >= g_start_time) ? (long)(now - g_start_time) : 0;
 
     pthread_mutex_lock(&g_state.lock);
     int audio = g_state.audio_playing;
@@ -3353,6 +3407,8 @@ static void send_status_json(int client) {
     int font_size = g_state.oled_font_size;
     int current_face = g_state.current_face;
     int global_volume = g_state.global_volume;
+    int show_song_metadata = g_state.show_song_metadata;
+    time_t pending_message_at = g_state.pending_message_at;
     int bedtime_enabled = g_state.bedtime_enabled;
     int bsh = g_state.bedtime_start_hour;
     int bsm = g_state.bedtime_start_min;
@@ -3361,91 +3417,95 @@ static void send_status_json(int client) {
     int bedtime_dim = g_state.bedtime_dim_percent;
     int clock_24h_mode = g_state.clock_24h_mode;
     int oled_brightness = g_state.oled_brightness_current;
+    int touch_ok = 0;
+    int touch_pressed = 0;
     char font_file[128];
     char clock_name[64];
     char audio_file[MUSIC_FILE_MAX];
+    char audio_title[MP_ID3_TEXT_MAX];
+    char audio_artist[MP_ID3_TEXT_MAX];
+    char audio_display[SONG_METADATA_TEXT_MAX];
     struct alarm_slot alarms[MAX_ALARMS];
-    safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
-    safe_str(clock_name, sizeof(clock_name), g_state.clock_name);
-    safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
+    mp_safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
+    mp_safe_str(clock_name, sizeof(clock_name), g_state.clock_name);
+    mp_safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
+    mp_safe_str(audio_title, sizeof(audio_title), g_state.audio_title);
+    mp_safe_str(audio_artist, sizeof(audio_artist), g_state.audio_artist);
+    mp_safe_str(audio_display, sizeof(audio_display), g_state.audio_display);
     memcpy(alarms, g_state.alarms, sizeof(alarms));
     pthread_mutex_unlock(&g_state.lock);
+    touch_get_state(&touch_ok, &touch_pressed);
 
-    int bedtime_active = is_bedtime_now();
+    char e_time[128], e_date[192], e_clock_name[160], e_audio_file[512];
+    char e_audio_title[384], e_audio_artist[384], e_audio_display[768];
+    char e_font_file[256], e_font_name[256];
+    mp_json_escape(e_time, sizeof(e_time), timestr);
+    mp_json_escape(e_date, sizeof(e_date), datestr);
+    mp_json_escape(e_clock_name, sizeof(e_clock_name), clock_name);
+    mp_json_escape(e_audio_file, sizeof(e_audio_file), audio_file);
+    mp_json_escape(e_audio_title, sizeof(e_audio_title), audio_title);
+    mp_json_escape(e_audio_artist, sizeof(e_audio_artist), audio_artist);
+    mp_json_escape(e_audio_display, sizeof(e_audio_display), audio_display);
+    mp_json_escape(e_font_file, sizeof(e_font_file), font_file);
+    mp_json_escape(e_font_name, sizeof(e_font_name), font_file[0] ? font_file : oled_font_name_for_id(font));
 
-    char e_time[128];
-    char e_date[192];
-    char e_clock_name[160];
-    char e_app_version[64];
-    char e_audio_file[512];
-    char e_font_file[256];
-    char e_font_name[256];
-    json_escape_to_buffer(e_time, sizeof(e_time), timestr);
-    json_escape_to_buffer(e_date, sizeof(e_date), datestr);
-    json_escape_to_buffer(e_clock_name, sizeof(e_clock_name), clock_name);
-    json_escape_to_buffer(e_app_version, sizeof(e_app_version), APP_VERSION);
-    json_escape_to_buffer(e_audio_file, sizeof(e_audio_file), audio_file);
-    json_escape_to_buffer(e_font_file, sizeof(e_font_file), font_file);
-    json_escape_to_buffer(e_font_name, sizeof(e_font_name), font_file[0] ? font_file : oled_font_name_for_id(font));
-
-    char body[16384];
-    snprintf(body, sizeof(body),
+    long long message_send_in = pending_message_at > now ? (long long)(pending_message_at - now) : 0LL;
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 4096, MP_IPC_MAX_PAYLOAD) != 0)
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    mp_buffer_appendf(&body,
         "{\"time\":\"%s\",\"date\":\"%s\",\"clock_name\":\"%s\",\"app_version\":\"%s\","
-        "\"uptime_seconds\":%ld,\"audio_file\":\"%s\",\"global_volume\":%d,\"bedtime_enabled\":%d,"
+        "\"uptime_seconds\":%ld,\"audio_file\":\"%s\",\"audio_title\":\"%s\",\"audio_artist\":\"%s\","
+        "\"audio_display\":\"%s\",\"global_volume\":%d,\"show_song_metadata\":%d,"
+        "\"message_pending\":%d,\"message_send_in_seconds\":%lld,\"bedtime_enabled\":%d,"
         "\"bedtime_start_hour\":%d,\"bedtime_start_min\":%d,\"bedtime_end_hour\":%d,\"bedtime_end_min\":%d,"
         "\"bedtime_dim_percent\":%d,\"clock_24h_mode\":%d,\"bedtime_active\":%d,\"oled_brightness_percent\":%d,"
         "\"audio_playing\":%d,\"alarm_active\":%d,\"alarm_volume_percent\":%d,\"display_mode\":\"%s\",\"oled_ok\":%d,"
+        "\"touch_ok\":%d,\"touch_pressed\":%d,\"touch_gpio\":%d,"
         "\"current_face\":%d,\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\",\"alarms\":[",
-        e_time, e_date, e_clock_name, e_app_version, uptime_seconds, e_audio_file,
-        global_volume, bedtime_enabled, bsh, bsm, beh, bem, bedtime_dim, clock_24h_mode,
-        bedtime_active, oled_brightness, audio, alarm_active, alarm_volume_percent,
-        display_mode_name(mode), oled_ok, current_face, font, font_size, e_font_file, e_font_name);
+        e_time, e_date, e_clock_name, APP_VERSION, uptime_seconds, e_audio_file,
+        e_audio_title, e_audio_artist, e_audio_display, global_volume, show_song_metadata,
+        message_send_in > 0 ? 1 : 0, message_send_in, bedtime_enabled,
+        bsh, bsm, beh, bem, bedtime_dim, clock_24h_mode,
+        is_bedtime_now(), oled_brightness, audio, alarm_active, alarm_volume_percent,
+        display_mode_name(mode), oled_ok, touch_ok, touch_pressed, GPIO_TOUCH,
+        current_face, font, font_size, e_font_file, e_font_name);
 
-    for (int i = 0; i < MAX_ALARMS; i++) {
-        char e_music_file[512];
-        json_escape_to_buffer(e_music_file, sizeof(e_music_file), alarms[i].music_file);
-        json_append(body, sizeof(body),
-            "%s{\"id\":%d,\"enabled\":%d,\"hour\":%d,\"min\":%d,\"weekdays\":%d,\"start_volume\":%d,\"end_volume\":%d,\"music_file\":\"%s\"}",
+    for (int i = 0; i < MAX_ALARMS && !body.failed; i++) {
+        mp_buffer_appendf(&body,
+            "%s{\"id\":%d,\"enabled\":%d,\"hour\":%d,\"min\":%d,\"weekdays\":%d,\"start_volume\":%d,\"end_volume\":%d,\"music_file\":\"",
             i ? "," : "", i + 1, alarms[i].enabled, alarms[i].hour, alarms[i].min,
-            alarms[i].weekdays, alarms[i].start_volume, alarms[i].end_volume, e_music_file);
+            alarms[i].weekdays, alarms[i].start_volume, alarms[i].end_volume);
+        mp_buffer_append_json_string(&body, alarms[i].music_file);
+        mp_buffer_append(&body, "\"}");
     }
-    json_append(body, sizeof(body), "]}");
-
-    http_send_json(client, body);
+    mp_buffer_append(&body, "]}");
+    return ipc_send_builder(client, 200, &body);
 }
 
-
-static void send_log_json(int client) {
+static int ipc_logs_get(int client) {
     pthread_mutex_lock(&g_log_lock);
-
     FILE *f = fopen(LOG_FILE, "rb");
     if (!f) {
         pthread_mutex_unlock(&g_log_lock);
-        http_send_json(client, "{\"ok\":true,\"log_file\":\"" LOG_FILE "\",\"entries\":[]}");
-        return;
+        return ipc_send_json(client, 200, "{\"ok\":true,\"log_file\":\"" LOG_FILE "\",\"entries\":[]}");
     }
-
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
         pthread_mutex_unlock(&g_log_lock);
-        http_send_json(client, "{\"ok\":false,\"entries\":[]}");
-        return;
+        return ipc_send_json(client, 500, "{\"ok\":false,\"entries\":[]}");
     }
-
     long size = ftell(f);
     if (size < 0) size = 0;
     long start = size > LOG_MAX_BYTES ? size - LOG_MAX_BYTES : 0;
     if (fseek(f, start, SEEK_SET) != 0) start = 0;
-
     size_t cap = (size_t)(size - start);
-    char *buf = (char *)malloc(cap + 1);
+    char *buf = malloc(cap + 1);
     if (!buf) {
         fclose(f);
         pthread_mutex_unlock(&g_log_lock);
-        http_send_json(client, "{\"ok\":false,\"entries\":[]}");
-        return;
+        return ipc_send_json(client, 500, "{\"ok\":false,\"entries\":[]}");
     }
-
     size_t got = fread(buf, 1, cap, f);
     fclose(f);
     buf[got] = '\0';
@@ -3456,1774 +3516,637 @@ static void send_log_json(int client) {
         char *nl = strchr(buf, '\n');
         if (nl && nl[1]) first = nl + 1;
     }
-
     char *lines[LOG_VIEW_LINES];
     int count = 0;
     char *save = NULL;
     for (char *line = strtok_r(first, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-        if (!*line) continue;
-        lines[count % LOG_VIEW_LINES] = line;
-        count++;
+        if (*line) lines[count++ % LOG_VIEW_LINES] = line;
     }
-
-    char body[98304];
-    body[0] = '\0';
-    json_append(body, sizeof(body), "{\"ok\":true,\"log_file\":\"");
-    json_append_escaped(body, sizeof(body), LOG_FILE);
-    json_append(body, sizeof(body), "\",\"entries\":[");
-
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 4096, MP_IPC_MAX_PAYLOAD) != 0) {
+        free(buf);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"entries\":[]}");
+    }
+    mp_buffer_append(&body, "{\"ok\":true,\"log_file\":\"");
+    mp_buffer_append_json_string(&body, LOG_FILE);
+    mp_buffer_append(&body, "\",\"entries\":[");
     int n = count < LOG_VIEW_LINES ? count : LOG_VIEW_LINES;
     int start_idx = count > LOG_VIEW_LINES ? count % LOG_VIEW_LINES : 0;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && !body.failed; i++) {
         int idx = (start_idx + i) % LOG_VIEW_LINES;
-        json_append(body, sizeof(body), "%s\"", i ? "," : "");
-        json_append_escaped(body, sizeof(body), lines[idx]);
-        json_append(body, sizeof(body), "\"");
+        mp_buffer_appendf(&body, "%s\"", i ? "," : "");
+        mp_buffer_append_json_string(&body, lines[idx]);
+        mp_buffer_append(&body, "\"");
     }
-    json_append(body, sizeof(body), "]}");
+    mp_buffer_append(&body, "]}");
     free(buf);
-    http_send_json(client, body);
+    return ipc_send_builder(client, 200, &body);
 }
 
-static void handle_clear_log(int client) {
+static int ipc_logs_clear(int client) {
     pthread_mutex_lock(&g_log_lock);
     ensure_dir(CONFIG_DIR);
     FILE *f = fopen(LOG_FILE, "w");
     if (f) fclose(f);
     pthread_mutex_unlock(&g_log_lock);
-    app_log("log", "Log cleared from web GUI");
-    http_send_json(client, "{\"ok\":true}");
+    app_log("log", "Log cleared through API");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
-static void send_faces_json(int client, const char *query) {
-    int all = parse_int_query(query, "all", 0);
-    int page = parse_int_query(query, "page", 1);
-    char kind[32] = "";
-    parse_string_query(query, "kind", kind, sizeof(kind));
-    int bedtime = (strcmp(kind, "bedtime") == 0);
-    if (page < 1) page = 1;
-
-    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-    int count = bedtime ? collect_bedtime_face_files(files, ASSET_LIST_MAX_FILES) : collect_uploaded_face_files(files, ASSET_LIST_MAX_FILES);
-    int per_page = all ? (count > 0 ? count : 1) : 8;
-    int max_page = all ? 1 : ((count + per_page - 1) / per_page);
-    if (max_page < 1) max_page = 1;
-    if (page > max_page) page = max_page;
-
-    int start = all ? 0 : ((page - 1) * per_page);
-    int end = all ? count : (start + per_page);
-    if (end > count) end = count;
-
-    char body[65536];
-    snprintf(body, sizeof(body),
-        "{\"kind\":\"%s\",\"page\":%d,\"max_page\":%d,\"per_page\":%d,\"count\":%d,\"faces\":[",
-        bedtime ? "bedtime" : "normal", page, max_page, per_page, count);
-
-    for (int i = start; i < end; i++) {
-        char title[FACE_FILE_MAX];
-        char source_png[FACE_FILE_MAX];
-        char preview_url[256];
-        int has_source = source_face_png_exists(files[i], bedtime, source_png, sizeof(source_png));
-        face_title_from_file(files[i], title, sizeof(title));
-        if (has_source) {
-            snprintf(preview_url, sizeof(preview_url), "/face-source?kind=%s&file=%s", bedtime ? "bedtime" : "normal", files[i]);
-        } else {
-            preview_url[0] = '\0';
-            source_png[0] = '\0';
-        }
-
-        char e_file[256];
-        char e_title[256];
-        char e_source_png[256];
-        char e_preview_url[512];
-        json_escape_to_buffer(e_file, sizeof(e_file), files[i]);
-        json_escape_to_buffer(e_title, sizeof(e_title), title);
-        json_escape_to_buffer(e_source_png, sizeof(e_source_png), source_png);
-        json_escape_to_buffer(e_preview_url, sizeof(e_preview_url), preview_url);
-
-        json_append(body, sizeof(body),
-            "%s{\"id\":%d,\"file\":\"%s\",\"title\":\"%s\",\"source_png\":\"%s\",\"preview_url\":\"%s\",\"source_exists\":%d,\"exists\":1}",
-            i == start ? "" : ",", i + 1, e_file, e_title, e_source_png, e_preview_url, has_source ? 1 : 0);
-    }
-
-    json_append(body, sizeof(body), "]}");
-    http_send_json(client, body);
-}
-
-static void send_fonts_json(int client) {
-    pthread_mutex_lock(&g_state.lock);
-    int font = g_state.oled_font;
-    int font_size = g_state.oled_font_size;
-    char selected[128];
-    safe_str(selected, sizeof(selected), g_state.oled_font_file);
-    pthread_mutex_unlock(&g_state.lock);
-
-    char esc_selected[256];
-    json_escape_to_buffer(esc_selected, sizeof(esc_selected), selected);
-
-    char body[16384];
-    size_t len = 0;
-    int n = snprintf(body, sizeof(body),
-        "{\"selected\":\"%s\",\"builtin\":%d,\"font_size\":%d,\"builtin_fonts\":[",
-        esc_selected, font, font_size);
-    if (n < 0) return;
-    len = (size_t)n < sizeof(body) ? (size_t)n : sizeof(body) - 1;
-
-    for (int i = 0; i < 4 && len < sizeof(body) - 1; i++) {
-        char esc_name[128];
-        json_escape_to_buffer(esc_name, sizeof(esc_name), oled_font_name_for_id(i));
-        n = snprintf(body + len, sizeof(body) - len,
-                     "%s{\"id\":%d,\"name\":\"%s\"}",
-                     i ? "," : "", i, esc_name);
-        if (n < 0) break;
-        size_t avail = sizeof(body) - len;
-        len += ((size_t)n < avail) ? (size_t)n : avail - 1;
-    }
-
-    if (len < sizeof(body) - 1) {
-        n = snprintf(body + len, sizeof(body) - len, "],\"uploaded_fonts\":[");
-        if (n > 0) {
-            size_t avail = sizeof(body) - len;
-            len += ((size_t)n < avail) ? (size_t)n : avail - 1;
-        }
-    }
-
-    char font_files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-    int font_count = collect_font_files(font_files, ASSET_LIST_MAX_FILES);
-    int count = 0;
-    for (int i = 0; i < font_count && len < sizeof(body) - 1; i++) {
-        char esc_file[256];
-        json_escape_to_buffer(esc_file, sizeof(esc_file), font_files[i]);
-        n = snprintf(body + len, sizeof(body) - len,
-                     "%s\"%s\"", count ? "," : "", esc_file);
-        if (n < 0) break;
-        size_t avail = sizeof(body) - len;
-        len += ((size_t)n < avail) ? (size_t)n : avail - 1;
-        count++;
-    }
-
-    if (len < sizeof(body) - 1) {
-        snprintf(body + len, sizeof(body) - len, "]}");
-    } else {
-        body[sizeof(body) - 1] = '\0';
-    }
-    http_send_json(client, body);
-}
-
-static void send_music_json(int client) {
-    pthread_mutex_lock(&g_state.lock);
-    int global_volume = g_state.global_volume;
-    char current[MUSIC_FILE_MAX];
-    safe_str(current, sizeof(current), g_state.audio_file);
-    pthread_mutex_unlock(&g_state.lock);
-
-    char body[16384];
-    body[0] = '\0';
-    json_append(body, sizeof(body), "{\"global_volume\":%d,\"current\":\"", global_volume);
-    json_append_escaped(body, sizeof(body), current);
-    json_append(body, sizeof(body), "\",\"files\":[");
-
-    char music_files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-    int music_count = collect_music_files(music_files, ASSET_LIST_MAX_FILES);
-    for (int i = 0; i < music_count; i++) {
-        json_append(body, sizeof(body), "%s\"", i ? "," : "");
-        json_append_escaped(body, sizeof(body), music_files[i]);
-        json_append(body, sizeof(body), "\"");
-    }
-    json_append(body, sizeof(body), "]}");
-    http_send_json(client, body);
-}
-
-static void send_message_limit_json(int client) {
-    int advisory_chars = message_char_capacity_for_current_font();
+static int ipc_message_limits(int client) {
     char body[512];
     snprintf(body, sizeof(body),
         "{\"max_chars\":%d,\"advisory_chars\":%d,\"max_lines\":%d,\"text_width\":%d,\"duration_seconds\":%d,\"wrap_check\":1}",
-        MESSAGE_INPUT_MAX_CHARS, advisory_chars, MESSAGE_MAX_LINES, MESSAGE_TEXT_W, MESSAGE_DEFAULT_DURATION_SECONDS);
-    http_send_json(client, body);
+        MESSAGE_INPUT_MAX_CHARS, message_char_capacity_for_current_font(), MESSAGE_MAX_LINES,
+        MESSAGE_TEXT_W, MESSAGE_DEFAULT_DURATION_SECONDS);
+    return ipc_send_json(client, 200, body);
 }
 
-static void send_message_fit_json(int client, const char *query) {
-    char text[192] = "";
-    char reason[160] = "";
-    parse_string_query(query, "text", text, sizeof(text));
+static int ipc_message_fit(int client, const struct mp_ipc_message_fit *request) {
+    char text[192];
+    mp_safe_str(text, sizeof(text), request->text);
     sanitize_message_text(text);
-
-    int advisory_chars = message_char_capacity_for_current_font();
+    char reason[160] = "";
     int ok = message_fits_display(text, reason, sizeof(reason));
-
     char font_file[128];
-    int px_size = 18;
-    int scale = MESSAGE_FALLBACK_SCALE;
-    int use_ttf = 0;
+    int px_size = 18, scale = MESSAGE_FALLBACK_SCALE, use_ttf = 0;
     message_layout_params(font_file, sizeof(font_file), &px_size, &scale, &use_ttf);
-
     char lines[MESSAGE_MAX_LINES][MESSAGE_LINE_CHARS];
     memset(lines, 0, sizeof(lines));
-    int line_count = wrap_message_lines(use_ttf ? font_file : "", px_size, text, MESSAGE_TEXT_W, lines, MESSAGE_MAX_LINES, scale);
+    int line_count = wrap_message_lines(use_ttf ? font_file : "", px_size, text,
+                                        MESSAGE_TEXT_W, lines, MESSAGE_MAX_LINES, scale);
     if (!text[0]) line_count = 0;
-
-    char body[4096];
-    body[0] = '\0';
-    json_append(body, sizeof(body),
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 1024, 8192) != 0)
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    mp_buffer_appendf(&body,
         "{\"ok\":%d,\"chars\":%d,\"max_chars\":%d,\"advisory_chars\":%d,\"wrap_check\":1,\"max_lines\":%d,\"line_count\":%d,\"text_x\":%d,\"text_w\":%d,\"face_x\":0,\"face_y\":0,\"face_size\":64,\"reason\":\"",
-        ok,
-        (int)strlen(text),
-        MESSAGE_INPUT_MAX_CHARS,
-        advisory_chars,
-        MESSAGE_MAX_LINES,
-        line_count,
-        MESSAGE_TEXT_X,
-        MESSAGE_TEXT_W);
-    json_append_escaped(body, sizeof(body), reason);
-    json_append(body, sizeof(body), "\",\"lines\":[");
-    for (int i = 0; i < line_count && i < MESSAGE_MAX_LINES; i++) {
-        json_append(body, sizeof(body), "%s\"", i ? "," : "");
-        json_append_escaped(body, sizeof(body), lines[i]);
-        json_append(body, sizeof(body), "\"");
+        ok, (int)strlen(text), MESSAGE_INPUT_MAX_CHARS, message_char_capacity_for_current_font(),
+        MESSAGE_MAX_LINES, line_count, MESSAGE_TEXT_X, MESSAGE_TEXT_W);
+    mp_buffer_append_json_string(&body, reason);
+    mp_buffer_append(&body, "\",\"lines\":[");
+    for (int i = 0; i < line_count && i < MESSAGE_MAX_LINES && !body.failed; i++) {
+        mp_buffer_appendf(&body, "%s\"", i ? "," : "");
+        mp_buffer_append_json_string(&body, lines[i]);
+        mp_buffer_append(&body, "\"");
     }
-    json_append(body, sizeof(body), "]}");
-    http_send_json(client, body);
+    mp_buffer_append(&body, "]}");
+    return ipc_send_builder(client, 200, &body);
 }
 
-static char *memmem_simple(const char *hay, size_t hay_len, const char *needle, size_t needle_len) {
-    if (!hay || !needle || needle_len == 0 || hay_len < needle_len) return NULL;
-    for (size_t i = 0; i + needle_len <= hay_len; i++) {
-        if (memcmp(hay + i, needle, needle_len) == 0) return (char *)(hay + i);
-    }
-    return NULL;
-}
-
-static int extract_multipart_file(char *body, size_t body_len, const char *boundary, uint8_t **file_data, size_t *file_len) {
-    *file_data = NULL;
-    *file_len = 0;
-    if (!body || !boundary) return -1;
-
-    char marker[256];
-    snprintf(marker, sizeof(marker), "--%s", boundary);
-
-    char *part = memmem_simple(body, body_len, marker, strlen(marker));
-    if (!part) return -1;
-
-    char *headers_end = memmem_simple(part, body_len - (size_t)(part - body), "\r\n\r\n", 4);
-    if (!headers_end) return -1;
-
-    char *data = headers_end + 4;
-    size_t data_avail = body_len - (size_t)(data - body);
-
-    char end_marker[300];
-    snprintf(end_marker, sizeof(end_marker), "\r\n--%s", boundary);
-    char *end = memmem_simple(data, data_avail, end_marker, strlen(end_marker));
-    if (!end) return -1;
-
-    *file_data = (uint8_t *)data;
-    *file_len = (size_t)(end - data);
-    return *file_len > 0 ? 0 : -1;
-}
-
-static int extract_multipart_filename(char *body, size_t body_len, const char *boundary, char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-    if (!body || !boundary) return -1;
-
-    char marker[256];
-    snprintf(marker, sizeof(marker), "--%s", boundary);
-
-    char *part = memmem_simple(body, body_len, marker, strlen(marker));
-    if (!part) return -1;
-
-    char *headers_end = memmem_simple(part, body_len - (size_t)(part - body), "\r\n\r\n", 4);
-    if (!headers_end) return -1;
-
-    char *fn = memmem_simple(part, (size_t)(headers_end - part), "filename=\"", 10);
-    if (!fn) return -1;
-    fn += 10;
-    char *end = memchr(fn, '"', (size_t)(headers_end - fn));
-    if (!end) return -1;
-
-    const char *base = fn;
-    for (char *p = fn; p < end; p++) {
-        if (*p == '/' || *p == '\\') base = p + 1;
-    }
-
-    size_t n = (size_t)(end - base);
-    if (n >= out_len) n = out_len - 1;
-    memcpy(out, base, n);
-    out[n] = '\0';
-    return out[0] ? 0 : -1;
-}
-
-struct multipart_file_part {
-    char filename[MUSIC_FILE_MAX];
-    uint8_t *data;
-    size_t len;
-};
-
-typedef int (*multipart_file_cb)(const struct multipart_file_part *part, void *user);
-
-static int foreach_multipart_file(char *body, size_t body_len, const char *boundary, multipart_file_cb cb, void *user) {
-    if (!body || !boundary || !cb) return -1;
-
-    char marker[256];
-    snprintf(marker, sizeof(marker), "--%s", boundary);
-    size_t marker_len = strlen(marker);
-    char end_marker[300];
-    snprintf(end_marker, sizeof(end_marker), "\r\n--%s", boundary);
-    size_t end_marker_len = strlen(end_marker);
-
-    char *pos = body;
-    size_t remaining = body_len;
-    int count = 0;
-
-    while (remaining > marker_len) {
-        char *part = memmem_simple(pos, remaining, marker, marker_len);
-        if (!part) break;
-        if ((size_t)(part - body) + marker_len + 2 <= body_len &&
-            part[marker_len] == '-' && part[marker_len + 1] == '-') break;
-
-        size_t part_avail = body_len - (size_t)(part - body);
-        char *headers_end = memmem_simple(part, part_avail, "\r\n\r\n", 4);
-        if (!headers_end) break;
-
-        char filename[FACE_FILE_MAX] = "";
-        char *fn = memmem_simple(part, (size_t)(headers_end - part), "filename=\"", 10);
-        if (fn) {
-            fn += 10;
-            char *q = memchr(fn, '"', (size_t)(headers_end - fn));
-            if (q) {
-                const char *base = fn;
-                for (char *p = fn; p < q; p++) {
-                    if (*p == '/' || *p == '\\') base = p + 1;
-                }
-                size_t n = (size_t)(q - base);
-                if (n >= sizeof(filename)) n = sizeof(filename) - 1;
-                memcpy(filename, base, n);
-                filename[n] = '\0';
-            }
+static int ipc_display_action(int client, const struct mp_ipc_display_action *request) {
+    switch (request->action) {
+        case MP_IPC_ACTION_CLOCK:
+            pthread_mutex_lock(&g_state.lock);
+            g_state.display_mode = 0;
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            app_log("action", "Show clock requested");
+            break;
+        case MP_IPC_ACTION_CLEAR:
+            pthread_mutex_lock(&g_state.lock);
+            g_state.display_mode = 1;
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            app_log("action", "Clear screen requested");
+            break;
+        case MP_IPC_ACTION_STOP_AUDIO:
+            audio_request_stop();
+            app_log("action", "Stop audio requested");
+            break;
+        case MP_IPC_ACTION_PLAY_MUSIC: {
+            int volume;
+            pthread_mutex_lock(&g_state.lock);
+            volume = g_state.global_volume;
+            pthread_mutex_unlock(&g_state.lock);
+            audio_play_music_file(request->file, volume, volume, 0);
+            app_log("action", "Play music requested: %s", request->file);
+            break;
         }
-
-        char *data = headers_end + 4;
-        size_t data_avail = body_len - (size_t)(data - body);
-        char *end = memmem_simple(data, data_avail, end_marker, end_marker_len);
-        if (!end) break;
-
-        if (filename[0] && end > data) {
-            struct multipart_file_part part_info;
-            safe_str(part_info.filename, sizeof(part_info.filename), filename);
-            part_info.data = (uint8_t *)data;
-            part_info.len = (size_t)(end - data);
-            if (part_info.len > 0) {
-                if (cb(&part_info, user) == 0) count++;
-            }
-        }
-
-        pos = end + 2;
-        remaining = body_len - (size_t)(pos - body);
+        default:
+            return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"unknown display action\"}");
     }
-
-    return count > 0 ? count : -1;
+    return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
-static int save_bytes(const char *path, const uint8_t *data, size_t len) {
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
-    size_t n = fwrite(data, 1, len, f);
-    fclose(f);
-    return n == len ? 0 : -1;
-}
-
-static void url_decode_inplace(char *s) {
-    char *o = s;
-    for (char *p = s; *p; p++) {
-        if (*p == '+') *o++ = ' ';
-        else if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
-            char hex[3] = {p[1], p[2], 0};
-            *o++ = (char)strtol(hex, NULL, 16);
-            p += 2;
-        } else {
-            *o++ = *p;
-        }
-    }
-    *o = '\0';
-}
-
-typedef void (*form_field_cb_t)(const char *key, const char *val, void *user);
-
-static int for_each_form_field(char *body, form_field_cb_t cb, void *user) {
-    if (!cb) return -1;
-    if (!body || !*body) return 0;
-
-    char *saveptr = NULL;
-    for (char *tok = strtok_r(body, "&", &saveptr); tok; tok = strtok_r(NULL, "&", &saveptr)) {
-        char *eq = strchr(tok, '=');
-        if (!eq) continue;
-        *eq = '\0';
-        char *key = tok;
-        char *val = eq + 1;
-        url_decode_inplace(key);
-        url_decode_inplace(val);
-        cb(key, val, user);
-    }
-
-    return 0;
-}
-
-struct alarm_form_ctx {
-    int id;
-    struct alarm_slot *alarm;
-};
-
-static void parse_alarm_form_field(const char *key, const char *val, void *user) {
-    struct alarm_form_ctx *ctx = (struct alarm_form_ctx *)user;
-    struct alarm_slot *a = ctx->alarm;
-
-    if (strcmp(key, "id") == 0) ctx->id = atoi(val);
-    else if (strcmp(key, "enabled") == 0) a->enabled = atoi(val) ? 1 : 0;
-    else if (strcmp(key, "time") == 0) sscanf(val, "%d:%d", &a->hour, &a->min);
-    else if (strcmp(key, "start_volume") == 0) a->start_volume = atoi(val);
-    else if (strcmp(key, "end_volume") == 0) a->end_volume = atoi(val);
-    else if (strcmp(key, "music_file") == 0) safe_str(a->music_file, sizeof(a->music_file), val);
-    else if (strncmp(key, "day", 3) == 0) {
-        int d = atoi(key + 3);
-        if (d >= 0 && d <= 6) a->weekdays |= (1 << d);
-    }
-}
-
-struct audio_form_ctx {
-    int global_volume;
-};
-
-static void parse_audio_form_field(const char *key, const char *val, void *user) {
-    struct audio_form_ctx *ctx = (struct audio_form_ctx *)user;
-    if (strcmp(key, "global_volume") == 0) ctx->global_volume = atoi(val);
-}
-
-struct personalization_form_ctx {
-    char *clock_name;
-    size_t clock_name_len;
-};
-
-static void parse_personalization_form_field(const char *key, const char *val, void *user) {
-    struct personalization_form_ctx *ctx = (struct personalization_form_ctx *)user;
-    if (strcmp(key, "clock_name") == 0) safe_str(ctx->clock_name, ctx->clock_name_len, val);
-}
-
-struct display_form_ctx {
-    int font;
-    int font_size;
-    int bedtime_enabled;
-    int bedtime_dim_percent;
-    int clock_24h_mode;
-    int bsh;
-    int bsm;
-    int beh;
-    int bem;
-    char *font_file;
-    size_t font_file_len;
-};
-
-static void parse_display_form_field(const char *key, const char *val, void *user) {
-    struct display_form_ctx *ctx = (struct display_form_ctx *)user;
-
-    if (strcmp(key, "oled_font") == 0) ctx->font = atoi(val);
-    else if (strcmp(key, "oled_font_size") == 0) ctx->font_size = atoi(val);
-    else if (strcmp(key, "oled_font_file") == 0) safe_str(ctx->font_file, ctx->font_file_len, val);
-    else if (strcmp(key, "bedtime_enabled") == 0) ctx->bedtime_enabled = atoi(val) ? 1 : 0;
-    else if (strcmp(key, "bedtime_dim_percent") == 0) ctx->bedtime_dim_percent = atoi(val);
-    else if (strcmp(key, "clock_24h_mode") == 0) ctx->clock_24h_mode = atoi(val) ? 1 : 0;
-    else if (strcmp(key, "bedtime_start") == 0) sscanf(val, "%d:%d", &ctx->bsh, &ctx->bsm);
-    else if (strcmp(key, "bedtime_end") == 0) sscanf(val, "%d:%d", &ctx->beh, &ctx->bem);
-}
-
-struct delete_face_form_ctx {
-    char *face_file;
-    size_t face_file_len;
-    char *kind;
-    size_t kind_len;
-    char *format;
-    size_t format_len;
-};
-
-static void parse_delete_face_form_field(const char *key, const char *val, void *user) {
-    struct delete_face_form_ctx *ctx = (struct delete_face_form_ctx *)user;
-    if (strcmp(key, "file") == 0) safe_str(ctx->face_file, ctx->face_file_len, val);
-    else if (strcmp(key, "kind") == 0) safe_str(ctx->kind, ctx->kind_len, val);
-    else if (strcmp(key, "format") == 0) safe_str(ctx->format, ctx->format_len, val);
-}
-
-struct format_form_ctx {
-    char *format;
-    size_t format_len;
-};
-
-static void parse_format_form_field(const char *key, const char *val, void *user) {
-    struct format_form_ctx *ctx = (struct format_form_ctx *)user;
-    if (strcmp(key, "format") == 0) safe_str(ctx->format, ctx->format_len, val);
-}
-
-struct font_delete_form_ctx {
-    char *font_file;
-    size_t font_file_len;
-};
-
-static void parse_font_delete_form_field(const char *key, const char *val, void *user) {
-    struct font_delete_form_ctx *ctx = (struct font_delete_form_ctx *)user;
-    if (strcmp(key, "font") == 0) safe_str(ctx->font_file, ctx->font_file_len, val);
-}
-
-struct message_form_ctx {
-    int face_id;
-    char *face_file;
-    size_t face_file_len;
-    char *message;
-    size_t message_len;
-    char *format;
-    size_t format_len;
-};
-
-static void parse_message_form_field(const char *key, const char *val, void *user) {
-    struct message_form_ctx *ctx = (struct message_form_ctx *)user;
-    if (strcmp(key, "face_id") == 0) {
-        ctx->face_id = atoi(val);
-    } else if ((strcmp(key, "face_file") == 0 || strcmp(key, "file") == 0) && safe_face_filename(val)) {
-        safe_str(ctx->face_file, ctx->face_file_len, val);
-    } else if (strcmp(key, "message_text") == 0 || strcmp(key, "message") == 0) {
-        safe_str(ctx->message, ctx->message_len, val);
-    } else if (strcmp(key, "format") == 0) {
-        safe_str(ctx->format, ctx->format_len, val);
-    }
-}
-
-static void handle_save_alarm(int client, char *body) {
-    int id = 1;
-    struct alarm_slot a;
-    a.enabled = 0;
-    a.hour = 7;
-    a.min = 0;
-    a.weekdays = 0;
-    a.start_volume = 20;
-    a.end_volume = 80;
-    a.fired_yday = -1;
-    a.music_file[0] = '\0';
-
-    struct alarm_form_ctx form = { .id = id, .alarm = &a };
-    if (for_each_form_field(body, parse_alarm_form_field, &form) != 0) {
-        http_redirect(client, "/alarm");
-        return;
-    }
-    id = form.id;
-
-    if (id < 1 || id > MAX_ALARMS) id = 1;
-    a.hour = clamp_int(a.hour, 0, 23);
-    a.min = clamp_int(a.min, 0, 59);
-    a.start_volume = clamp_int(a.start_volume, 0, 100);
-    a.end_volume = clamp_int(a.end_volume, 0, 100);
-    if (a.weekdays == 0) a.weekdays = 0x7F;
-    if (a.music_file[0]) {
-        char music_path[512];
-        if (!safe_asset_filename(a.music_file) || !has_mp3_ext(a.music_file)) {
-            a.music_file[0] = '\0';
-        } else {
-            make_music_path(a.music_file, music_path, sizeof(music_path));
-            if (access(music_path, R_OK) != 0) a.music_file[0] = '\0';
-        }
-    }
-
-    pthread_mutex_lock(&g_state.lock);
-    g_state.alarms[id - 1] = a;
-    sync_legacy_alarm_fields_locked();
-    pthread_mutex_unlock(&g_state.lock);
-
-    save_config();
-    app_log("alarm", "Saved alarm %d", id);
-    http_redirect(client, "/alarm");
-}
-
-static void handle_save_audio(int client, char *body) {
-    int global_volume;
-    pthread_mutex_lock(&g_state.lock);
-    global_volume = g_state.global_volume;
-    pthread_mutex_unlock(&g_state.lock);
-
-    struct audio_form_ctx form = { .global_volume = global_volume };
-    if (for_each_form_field(body, parse_audio_form_field, &form) != 0) {
-        http_redirect(client, "/music");
-        return;
-    }
-    global_volume = form.global_volume;
-
-    global_volume = clamp_int(global_volume, 0, 100);
-    pthread_mutex_lock(&g_state.lock);
-    g_state.global_volume = global_volume;
-    pthread_mutex_unlock(&g_state.lock);
-    save_config();
-    app_log("music", "Saved global volume %d%%", global_volume);
-    http_redirect(client, "/music");
-}
-
-static void handle_save_personalization(int client, char *body) {
-    char clock_name[64];
-
-    pthread_mutex_lock(&g_state.lock);
-    safe_str(clock_name, sizeof(clock_name), g_state.clock_name);
-    pthread_mutex_unlock(&g_state.lock);
-
-    struct personalization_form_ctx form = {
-        .clock_name = clock_name,
-        .clock_name_len = sizeof(clock_name)
-    };
-    if (for_each_form_field(body, parse_personalization_form_field, &form) != 0) {
-        http_redirect(client, "/display");
-        return;
-    }
-
-    sanitize_clock_name(clock_name);
-
-    pthread_mutex_lock(&g_state.lock);
-    safe_str(g_state.clock_name, sizeof(g_state.clock_name), clock_name);
-    pthread_mutex_unlock(&g_state.lock);
-
-    save_config();
-    app_log("settings", "Saved clock name %s", clock_name);
-    http_redirect(client, "/display");
-}
-
-static void handle_save_display(int client, char *body) {
-    int font = 0;
-    int font_size = 42;
-    int bedtime_enabled = 0;
-    int bedtime_dim_percent = 35;
-    int clock_24h_mode = 0;
-    int bsh = 21, bsm = 0, beh = 7, bem = 0;
-    char font_file[128] = "";
-
-    pthread_mutex_lock(&g_state.lock);
-    font = g_state.oled_font;
-    font_size = g_state.oled_font_size;
-    bedtime_enabled = g_state.bedtime_enabled;
-    bedtime_dim_percent = g_state.bedtime_dim_percent;
-    clock_24h_mode = g_state.clock_24h_mode;
-    bsh = g_state.bedtime_start_hour;
-    bsm = g_state.bedtime_start_min;
-    beh = g_state.bedtime_end_hour;
-    bem = g_state.bedtime_end_min;
-    safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
-    pthread_mutex_unlock(&g_state.lock);
-
-    struct display_form_ctx form = {
-        .font = font,
-        .font_size = font_size,
-        .bedtime_enabled = bedtime_enabled,
-        .bedtime_dim_percent = bedtime_dim_percent,
-        .clock_24h_mode = clock_24h_mode,
-        .bsh = bsh,
-        .bsm = bsm,
-        .beh = beh,
-        .bem = bem,
-        .font_file = font_file,
-        .font_file_len = sizeof(font_file)
-    };
-    if (for_each_form_field(body, parse_display_form_field, &form) != 0) {
-        http_redirect(client, "/display");
-        return;
-    }
-
-    font = form.font;
-    font_size = form.font_size;
-    bedtime_enabled = form.bedtime_enabled;
-    bedtime_dim_percent = form.bedtime_dim_percent;
-    clock_24h_mode = form.clock_24h_mode;
-    bsh = form.bsh;
-    bsm = form.bsm;
-    beh = form.beh;
-    bem = form.bem;
-
-    if (font < 0 || font > 3) font = 0;
-    if (font_size < 18) font_size = 18;
-    if (font_size > 54) font_size = 54;
-    bedtime_enabled = bedtime_enabled ? 1 : 0;
-    clock_24h_mode = clock_24h_mode ? 1 : 0;
-    bedtime_dim_percent = clamp_int(bedtime_dim_percent, 0, 100);
-    bsh = clamp_int(bsh, 0, 23);
-    bsm = clamp_int(bsm, 0, 59);
-    beh = clamp_int(beh, 0, 23);
-    bem = clamp_int(bem, 0, 59);
-
-    if (font_file[0]) {
-        char font_path[512];
-        if (!safe_asset_filename(font_file) || !has_font_ext(font_file)) {
-            font_file[0] = '\0';
-        } else {
-            make_font_path(font_file, font_path, sizeof(font_path));
-            if (access(font_path, R_OK) != 0) font_file[0] = '\0';
-        }
-    }
-
-    pthread_mutex_lock(&g_state.lock);
-    int changed = (g_state.oled_font_size != font_size) || (strcmp(g_state.oled_font_file, font_file) != 0);
-    g_state.oled_font = font;
-    g_state.oled_font_size = font_size;
-    g_state.clock_24h_mode = clock_24h_mode;
-    g_state.bedtime_enabled = bedtime_enabled;
-    g_state.bedtime_dim_percent = bedtime_dim_percent;
-    g_state.bedtime_start_hour = bsh;
-    g_state.bedtime_start_min = bsm;
-    g_state.bedtime_end_hour = beh;
-    g_state.bedtime_end_min = bem;
-    safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), font_file);
-    g_state.display_dirty = 1;
-    if (changed && g_state.ft_face) {
-        FT_Done_Face(g_state.ft_face);
-        g_state.ft_face = NULL;
-        g_state.ft_loaded_file[0] = '\0';
-        g_state.ft_loaded_size = 0;
-    }
-    pthread_mutex_unlock(&g_state.lock);
-
-    save_config();
-    app_log("display", "Saved display settings");
-    http_redirect(client, "/display");
-}
-
-static void handle_delete_font(int client, char *body) {
-    char font_file[128] = "";
-    struct font_delete_form_ctx form = {
-        .font_file = font_file,
-        .font_file_len = sizeof(font_file)
-    };
-    (void)for_each_form_field(body, parse_font_delete_form_field, &form);
-
-    if (!safe_asset_filename(font_file) || !has_font_ext(font_file)) {
-        http_send(client, "400 Bad Request", "text/plain", "Invalid font filename");
-        return;
-    }
-
-    char path[512];
-    make_font_path(font_file, path, sizeof(path));
-    unlink(path);
-    invalidate_asset_list_cache(&g_font_list_cache);
-
-    pthread_mutex_lock(&g_state.lock);
-    if (strcmp(g_state.oled_font_file, font_file) == 0) {
-        g_state.oled_font_file[0] = '\0';
-    }
-    if (strcmp(g_state.ft_loaded_file, font_file) == 0) {
-        if (g_state.ft_face) {
-            FT_Done_Face(g_state.ft_face);
-            g_state.ft_face = NULL;
-        }
-        g_state.ft_loaded_file[0] = '\0';
-        g_state.ft_loaded_size = 0;
-    }
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
-
-    save_config();
-    app_log("fonts", "Deleted font %s", font_file);
-    http_redirect(client, "/display");
-}
-
-
-static void handle_delete_face(int client, char *body) {
-    char face_file[FACE_FILE_MAX] = "";
-    char kind[32] = "normal";
-    char format[16] = "";
-
-    struct delete_face_form_ctx form = {
-        .face_file = face_file,
-        .face_file_len = sizeof(face_file),
-        .kind = kind,
-        .kind_len = sizeof(kind),
-        .format = format,
-        .format_len = sizeof(format)
-    };
-    (void)for_each_form_field(body, parse_delete_face_form_field, &form);
-
-    int bedtime = (strcmp(kind, "bedtime") == 0);
-    if (!safe_face_filename(face_file)) {
-        if (strcmp(format, "json") == 0) http_send(client, "400 Bad Request", "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"Invalid face filename\"}");
-        else http_send(client, "400 Bad Request", "text/plain", "Invalid face filename");
-        return;
-    }
-
-    char raw_path[512];
-    int raw_ok = bedtime
-        ? (make_bedtime_face_path_by_file(face_file, raw_path, sizeof(raw_path)) == 0)
-        : (make_face_path_by_file(face_file, raw_path, sizeof(raw_path)) == 0);
-    if (!raw_ok) {
-        if (strcmp(format, "json") == 0) http_send(client, "400 Bad Request", "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"Invalid face path\"}");
-        else http_send(client, "400 Bad Request", "text/plain", "Invalid face path");
-        return;
-    }
-
-    char png_path[512];
-    int has_source_path = (make_source_face_png_path_by_raw(face_file, bedtime, png_path, sizeof(png_path)) == 0);
-
-    unlink(raw_path);
-    if (has_source_path) unlink(png_path);
-    if (bedtime) invalidate_bedtime_face_assets();
-    else invalidate_normal_face_assets();
-
-    pthread_mutex_lock(&g_state.lock);
-    if (!bedtime) {
-        if (strcmp(g_state.current_face_file, face_file) == 0) g_state.current_face_file[0] = '\0';
-        if (strcmp(g_state.message_face_file, face_file) == 0) g_state.message_face_file[0] = '\0';
-        if (strcmp(g_clock_face_cached, face_file) == 0) g_clock_face_cached[0] = '\0';
-        g_clock_face_next_change = 0;
-    } else {
-        if (strcmp(g_bedtime_face_cached, face_file) == 0) g_bedtime_face_cached[0] = '\0';
-        g_bedtime_face_next_change = 0;
-    }
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
-    app_log("faces", "Deleted %s face %s", bedtime ? "bedtime" : "normal", face_file);
-
-    if (strcmp(format, "json") == 0) {
-        http_send_json(client, "{\"ok\":true,\"deleted\":true}");
-    } else {
-        http_redirect(client, "/faces");
-    }
-}
-
-
-static int delete_matching_assets_in_dir(const char *dir, int raw_files, int png_files, int mp3_files) {
-    if (!dir) return 0;
-    DIR *d = opendir(dir);
-    if (!d) return 0;
-
-    int deleted = 0;
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        const char *name = de->d_name;
-        if (!safe_asset_filename(name)) continue;
-
-        int match = 0;
-        if (raw_files && has_raw_ext(name)) match = 1;
-        if (png_files && has_png_ext(name)) match = 1;
-        if (mp3_files && has_mp3_ext(name)) match = 1;
-        if (!match) continue;
-
-        char path[512];
-        snprintf(path, sizeof(path), "%s/%s", dir, name);
-        if (unlink(path) == 0) deleted++;
-    }
-
-    closedir(d);
-    return deleted;
-}
-
-static void parse_form_format(char *body, char *format, size_t format_len) {
-    if (!format || format_len == 0) return;
-    format[0] = '\0';
-    struct format_form_ctx ctx = { .format = format, .format_len = format_len };
-    (void)for_each_form_field(body, parse_format_form_field, &ctx);
-}
-
-static void handle_delete_assets(int client, char *body, const char *asset_type) {
-    char format[16] = "";
-    parse_form_format(body, format, sizeof(format));
-
-    if (strcmp(asset_type, "faces") == 0) {
-        int deleted_normal = delete_matching_assets_in_dir(FACE_DIR, 1, 1, 0);
-        int deleted_bedtime = delete_matching_assets_in_dir(BEDTIME_FACE_DIR, 1, 1, 0);
-        invalidate_all_face_assets();
-
-        pthread_mutex_lock(&g_state.lock);
-        g_state.current_face_file[0] = '\0';
-        g_state.message_face_file[0] = '\0';
-        g_state.preview_face_file[0] = '\0';
-        g_state.preview_face_until = 0;
-        g_state.display_dirty = 1;
-        g_clock_face_cached[0] = '\0';
-        g_clock_face_next_change = 0;
-        g_bedtime_face_cached[0] = '\0';
-        g_bedtime_face_next_change = 0;
-        pthread_mutex_unlock(&g_state.lock);
-
-        app_log("faces", "Deleted all faces, removed %d normal and %d bedtime", deleted_normal, deleted_bedtime);
-
-        if (strcmp(format, "json") == 0) {
-            char reply[160];
-            snprintf(reply, sizeof(reply), "{\"ok\":true,\"deleted_normal\":%d,\"deleted_bedtime\":%d}", deleted_normal, deleted_bedtime);
-            http_send_json(client, reply);
-        } else {
-            http_redirect(client, "/faces");
-        }
-        return;
-    }
-
-    if (strcmp(asset_type, "music") == 0) {
-        audio_stop();
-        int deleted_music = delete_matching_assets_in_dir(MUSIC_DIR, 0, 0, 1);
-        invalidate_asset_list_cache(&g_music_list_cache);
-
-        pthread_mutex_lock(&g_state.lock);
-        g_state.audio_playing = 0;
-        g_state.audio_file[0] = '\0';
-        for (int i = 0; i < MAX_ALARMS; i++) {
-            g_state.alarms[i].music_file[0] = '\0';
-        }
-        g_state.display_dirty = 1;
-        pthread_mutex_unlock(&g_state.lock);
-
-        save_config();
-        app_log("music", "Deleted all music, removed %d files", deleted_music);
-
-        if (strcmp(format, "json") == 0) {
-            char reply[128];
-            snprintf(reply, sizeof(reply), "{\"ok\":true,\"deleted_music\":%d}", deleted_music);
-            http_send_json(client, reply);
-        } else {
-            http_redirect(client, "/music");
-        }
-        return;
-    }
-
-    http_send(client, "400 Bad Request", "text/plain", "Unknown asset type");
-}
-
-static void handle_show_message(int client, char *body) {
-    char face_file[FACE_FILE_MAX] = "";
-    char message[192] = "";
-    char format[16] = "";
-    struct message_form_ctx form = {
-        .face_id = 1,
-        .face_file = face_file,
-        .face_file_len = sizeof(face_file),
-        .message = message,
-        .message_len = sizeof(message),
-        .format = format,
-        .format_len = sizeof(format)
-    };
-    (void)for_each_form_field(body, parse_message_form_field, &form);
-
-    if (!face_file[0]) {
-        if (face_id_valid_int(form.face_id)) snprintf(face_file, sizeof(face_file), "face_%03d.raw", form.face_id);
-        else if (random_uploaded_face_file(face_file, sizeof(face_file)) != 0) face_file[0] = '\0';
-    }
-    sanitize_message_text(message);
-    if (!message[0]) safe_str(message, sizeof(message), "Hello");
-
-    char fit_reason[160];
-    if (!message_fits_display(message, fit_reason, sizeof(fit_reason))) {
-        app_log("message", "Rejected message: %s", fit_reason[0] ? fit_reason : "too long for OLED");
-        if (strcmp(format, "json") == 0) {
-            char body_json[256];
-            snprintf(body_json, sizeof(body_json), "{\"ok\":false,\"error\":\"");
-            json_append_escaped(body_json, sizeof(body_json), fit_reason[0] ? fit_reason : "Message is too long for the OLED");
-            json_append(body_json, sizeof(body_json), "\"}");
-            http_send(client, "400 Bad Request", "application/json; charset=utf-8", body_json);
-        } else {
-            http_send(client, "400 Bad Request", "text/plain", fit_reason[0] ? fit_reason : "Message is too long for the OLED");
-        }
-        return;
-    }
-
-    pthread_mutex_lock(&g_state.lock);
-    g_state.display_mode = 3;
-    g_state.message_face = face_id_valid_int(form.face_id) ? form.face_id : 1;
-    safe_str(g_state.message_face_file, sizeof(g_state.message_face_file), face_file);
-    g_state.message_until = time(NULL) + MESSAGE_DEFAULT_DURATION_SECONDS;
-    safe_str(g_state.message_text, sizeof(g_state.message_text), message);
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
-    app_log("message", "Sent message to OLED with face %s: %.120s", face_file[0] ? face_file : "default", message);
-
-    if (strcmp(format, "json") == 0) {
-        http_send_json(client, "{\"ok\":true,\"mode\":\"message\"}");
-    } else {
-        http_redirect(client, "/");
-    }
-}
-
-static void handle_action(int client, const char *query) {
-    char action[64] = "";
-    char format[16] = "";
-    parse_string_query(query, "do", action, sizeof(action));
-    parse_string_query(query, "format", format, sizeof(format));
-
-    if (action[0]) app_log("action", "Web action requested: %s", action);
-
-    if (strcmp(action, "clock") == 0) {
-        pthread_mutex_lock(&g_state.lock);
-        g_state.display_mode = 0;
-        g_state.display_dirty = 1;
-        pthread_mutex_unlock(&g_state.lock);
-    } else if (strcmp(action, "clear") == 0) {
-        pthread_mutex_lock(&g_state.lock);
-        g_state.display_mode = 1;
-        g_state.display_dirty = 1;
-        pthread_mutex_unlock(&g_state.lock);
-    } else if (strcmp(action, "stop") == 0) {
-        audio_stop();
-    } else if (strcmp(action, "play-music") == 0) {
-        char file[MUSIC_FILE_MAX] = "";
-        int vol;
-        parse_string_query(query, "file", file, sizeof(file));
-        pthread_mutex_lock(&g_state.lock);
-        vol = g_state.global_volume;
-        pthread_mutex_unlock(&g_state.lock);
-        audio_play_music_file(file, vol, vol, 0);
-    }
-
-    if (strcmp(format, "json") == 0) {
-        http_send_json(client, "{\"ok\":true}");
-    } else {
-        http_redirect(client, "/");
-    }
-}
-
-static void handle_face_source_png(int client, const char *query) {
-    char kind[32] = "";
-    char file[FACE_FILE_MAX] = "";
-    parse_string_query(query, "kind", kind, sizeof(kind));
-    parse_string_query(query, "file", file, sizeof(file));
-
-    int bedtime = strcmp(kind, "bedtime") == 0;
-    if (!safe_face_filename(file)) {
-        http_send(client, "400 Bad Request", "text/plain", "Invalid face file");
-        return;
-    }
-
-    char path[512];
-    if (make_source_face_png_path_by_raw(file, bedtime, path, sizeof(path)) != 0) {
-        http_send(client, "400 Bad Request", "text/plain", "Invalid source PNG path");
-        return;
-    }
-
-    http_send_file(client, path, "image/png");
-}
-
-
-static void handle_font_file(int client, const char *query) {
-    char file[128] = "";
-    parse_string_query(query, "file", file, sizeof(file));
-
-    if (!safe_asset_filename(file) || !has_font_ext(file)) {
-        http_send(client, "400 Bad Request", "text/plain", "Invalid font file");
-        return;
-    }
-
-    char path[512];
-    make_font_path(file, path, sizeof(path));
-
-    const char *dot = strrchr(file, '.');
-    const char *ctype = (dot && strcasecmp(dot, ".otf") == 0) ? "font/otf" : "font/ttf";
-    http_send_file(client, path, ctype);
-}
-
-static void handle_show_face(int client, const char *query) {
-    int id = parse_int_query(query, "id", 1);
-    char file[FACE_FILE_MAX] = "";
-    char format[16] = "";
-    parse_string_query(query, "file", file, sizeof(file));
-    parse_string_query(query, "format", format, sizeof(format));
-
-    if (!safe_face_filename(file)) {
-        if (!face_id_valid_int(id)) id = 1;
-        snprintf(file, sizeof(file), "face_%03d.raw", id);
-    }
-
+static int ipc_display_face(int client, const struct mp_ipc_display_face *request) {
+    int id = face_id_valid_int(request->id) ? request->id : 1;
+    char file[FACE_FILE_MAX];
+    if (safe_face_filename(request->file)) mp_safe_str(file, sizeof(file), request->file);
+    else snprintf(file, sizeof(file), "face_%03d.raw", id);
     pthread_mutex_lock(&g_state.lock);
     g_state.display_mode = 0;
-    g_state.current_face = face_id_valid_int(id) ? id : 1;
-    safe_str(g_state.current_face_file, sizeof(g_state.current_face_file), file);
-    safe_str(g_state.preview_face_file, sizeof(g_state.preview_face_file), file);
+    g_state.current_face = id;
+    mp_safe_str(g_state.current_face_file, sizeof(g_state.current_face_file), file);
+    mp_safe_str(g_state.preview_face_file, sizeof(g_state.preview_face_file), file);
     g_state.preview_face_bedtime = 0;
     g_state.preview_face_until = time(NULL) + CLOCK_FACE_PREVIEW_SECONDS;
     g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
     app_log("faces", "Show face requested: %s", file);
+    return ipc_send_json(client, 200, "{\"ok\":true,\"mode\":\"face\"}");
+}
 
-    if (strcmp(format, "json") == 0) {
-        http_send_json(client, "{\"ok\":true,\"mode\":\"face\"}");
+static int valid_message_delay(unsigned int seconds) {
+    return seconds == 0 || seconds == 10 || seconds == 30 || seconds == MESSAGE_DELAY_MAX_SECONDS;
+}
+
+static void activate_pending_message_if_due(void) {
+    time_t now = time(NULL);
+    pthread_mutex_lock(&g_state.lock);
+    if (g_state.pending_message_at > 0 && now >= g_state.pending_message_at) {
+        g_state.display_mode = 3;
+        g_state.message_face = g_state.pending_message_face;
+        safe_str(g_state.message_face_file, sizeof(g_state.message_face_file),
+                 g_state.pending_message_face_file);
+        safe_str(g_state.message_text, sizeof(g_state.message_text),
+                 g_state.pending_message_text);
+        g_state.message_until = now + MESSAGE_DEFAULT_DURATION_SECONDS;
+        g_state.pending_message_at = 0;
+        g_state.pending_message_face_file[0] = '\0';
+        g_state.pending_message_text[0] = '\0';
+        g_state.display_dirty = 1;
+    }
+    pthread_mutex_unlock(&g_state.lock);
+}
+
+static int ipc_display_message(int client, const struct mp_ipc_display_message *request) {
+    char face_file[FACE_FILE_MAX] = "";
+    char message[192];
+    unsigned int delay_seconds = request->delay_seconds;
+    if (!valid_message_delay(delay_seconds))
+        return ipc_send_json(client, 400,
+            "{\"ok\":false,\"error\":\"delay_seconds must be 0, 10, 30, or 60\"}");
+    if (safe_face_filename(request->face_file)) mp_safe_str(face_file, sizeof(face_file), request->face_file);
+    if (!face_file[0]) {
+        if (face_id_valid_int(request->face_id)) snprintf(face_file, sizeof(face_file), "face_%03d.raw", request->face_id);
+        else if (random_uploaded_face_file(face_file, sizeof(face_file)) != 0) face_file[0] = '\0';
+    }
+    mp_safe_str(message, sizeof(message), request->text);
+    sanitize_message_text(message);
+    if (!message[0]) mp_safe_str(message, sizeof(message), "Hello");
+    char reason[160] = "";
+    if (!message_fits_display(message, reason, sizeof(reason))) {
+        struct mp_buffer body;
+        if (mp_buffer_init(&body, 256, 1024) != 0)
+            return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+        mp_buffer_append(&body, "{\"ok\":false,\"error\":\"");
+        mp_buffer_append_json_string(&body, reason[0] ? reason : "Message is too long for the OLED");
+        mp_buffer_append(&body, "\"}");
+        app_log("message", "Rejected message: %s", reason);
+        return ipc_send_builder(client, 400, &body);
+    }
+
+    time_t now = time(NULL);
+    pthread_mutex_lock(&g_state.lock);
+    if (delay_seconds == 0) {
+        g_state.display_mode = 3;
+        g_state.message_face = face_id_valid_int(request->face_id) ? request->face_id : 1;
+        mp_safe_str(g_state.message_face_file, sizeof(g_state.message_face_file), face_file);
+        g_state.message_until = now + MESSAGE_DEFAULT_DURATION_SECONDS;
+        mp_safe_str(g_state.message_text, sizeof(g_state.message_text), message);
+        g_state.pending_message_at = 0;
+        g_state.pending_message_face_file[0] = '\0';
+        g_state.pending_message_text[0] = '\0';
+        g_state.display_dirty = 1;
     } else {
-        http_redirect(client, "/faces");
-    }
-}
-
-struct face_upload_result {
-    int ok;
-    int fail;
-    char first_file[FACE_FILE_MAX];
-};
-
-static int upload_face_part_cb(const struct multipart_file_part *part, void *user) {
-    struct face_upload_result *res = (struct face_upload_result *)user;
-    if (!part || !res || !part->filename[0] || !has_png_ext(part->filename)) {
-        if (res) res->fail++;
-        return -1;
-    }
-
-    char raw_name[FACE_FILE_MAX];
-    make_raw_face_filename_from_upload(part->filename, raw_name, sizeof(raw_name));
-    if (!safe_face_filename(raw_name)) {
-        res->fail++;
-        return -1;
-    }
-
-    char path[512];
-    if (make_face_path_by_file(raw_name, path, sizeof(path)) != 0) {
-        res->fail++;
-        return -1;
-    }
-
-    if (save_face_raw_from_png_memory(part->data, part->len, path) != 0) {
-        res->fail++;
-        return -1;
-    }
-
-    if (save_source_face_png_if_missing(raw_name, 0, part->data, part->len) != 0) {
-        fprintf(stderr, "warning: could not save source PNG for face %s\n", raw_name);
-    }
-
-    if (!res->first_file[0]) safe_str(res->first_file, sizeof(res->first_file), raw_name);
-    res->ok++;
-    return 0;
-}
-
-static void handle_upload_face(int client, const char *query, char *body, size_t body_len, const char *ctype) {
-    (void)query;
-    const char *b = strstr(ctype ? ctype : "", "boundary=");
-    if (!b) {
-        http_send(client, "400 Bad Request", "text/plain", "Missing multipart boundary");
-        return;
-    }
-    b += 9;
-
-    struct face_upload_result res;
-    memset(&res, 0, sizeof(res));
-
-    if (foreach_multipart_file(body, body_len, b, upload_face_part_cb, &res) < 0 || res.ok <= 0) {
-        http_send(client, "400 Bad Request", "text/plain", "No PNG face files were uploaded or conversion failed");
-        return;
-    }
-
-    invalidate_normal_face_assets();
-
-    pthread_mutex_lock(&g_state.lock);
-    g_state.display_mode = 0;
-    safe_str(g_state.current_face_file, sizeof(g_state.current_face_file), res.first_file);
-    safe_str(g_state.preview_face_file, sizeof(g_state.preview_face_file), res.first_file);
-    g_state.preview_face_bedtime = 0;
-    g_state.preview_face_until = time(NULL) + CLOCK_FACE_PREVIEW_SECONDS;
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
-    app_log("faces", "Uploaded %d normal face file(s), first %s", res.ok, res.first_file);
-
-    http_redirect(client, "/faces");
-}
-
-static int upload_bedtime_face_part_cb(const struct multipart_file_part *part, void *user) {
-    struct face_upload_result *res = (struct face_upload_result *)user;
-    if (!part || !res || !part->filename[0] || !has_png_ext(part->filename)) {
-        if (res) res->fail++;
-        return -1;
-    }
-
-    char raw_name[FACE_FILE_MAX];
-    make_raw_face_filename_from_upload(part->filename, raw_name, sizeof(raw_name));
-    if (!safe_face_filename(raw_name)) {
-        res->fail++;
-        return -1;
-    }
-
-    char path[512];
-    if (make_bedtime_face_path_by_file(raw_name, path, sizeof(path)) != 0) {
-        res->fail++;
-        return -1;
-    }
-
-    if (save_face_raw_from_png_memory(part->data, part->len, path) != 0) {
-        res->fail++;
-        return -1;
-    }
-
-    if (save_source_face_png_if_missing(raw_name, 1, part->data, part->len) != 0) {
-        fprintf(stderr, "warning: could not save source PNG for bedtime face %s\n", raw_name);
-    }
-
-    if (!res->first_file[0]) safe_str(res->first_file, sizeof(res->first_file), raw_name);
-    res->ok++;
-    return 0;
-}
-
-static void handle_upload_bedtime_face(int client, const char *query, char *body, size_t body_len, const char *ctype) {
-    (void)query;
-    const char *b = strstr(ctype ? ctype : "", "boundary=");
-    if (!b) {
-        http_send(client, "400 Bad Request", "text/plain", "Missing multipart boundary");
-        return;
-    }
-    b += 9;
-
-    struct face_upload_result res;
-    memset(&res, 0, sizeof(res));
-
-    if (foreach_multipart_file(body, body_len, b, upload_bedtime_face_part_cb, &res) < 0 || res.ok <= 0) {
-        http_send(client, "400 Bad Request", "text/plain", "No bedtime PNG face files were uploaded or conversion failed");
-        return;
-    }
-
-    invalidate_bedtime_face_assets();
-    pthread_mutex_lock(&g_state.lock);
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
-    app_log("faces", "Uploaded %d bedtime face file(s), first %s", res.ok, res.first_file);
-
-    http_redirect(client, "/faces");
-}
-
-struct upload_music_result {
-    int ok;
-    int failed;
-    char first_file[MUSIC_FILE_MAX];
-    char last_error[160];
-};
-
-static void set_upload_music_error(struct upload_music_result *res, const char *name, const char *suffix) {
-    char shown_name[96];
-    if (name && *name) safe_str(shown_name, sizeof(shown_name), name);
-    else safe_str(shown_name, sizeof(shown_name), "uploaded file");
-    snprintf(res->last_error, sizeof(res->last_error), "%s %s", shown_name, suffix ? suffix : "failed");
-}
-
-static int upload_music_part_cb(const struct multipart_file_part *part, void *user) {
-    struct upload_music_result *res = (struct upload_music_result *)user;
-    char safe_name[MUSIC_FILE_MAX] = "";
-    sanitize_asset_filename(part->filename, safe_name, sizeof(safe_name), "alarm.mp3");
-
-    if (!has_mp3_ext(safe_name)) {
-        res->failed++;
-        set_upload_music_error(res, safe_name[0] ? safe_name : part->filename, "is not an MP3");
-        return -1;
-    }
-    if (!safe_asset_filename(safe_name)) {
-        res->failed++;
-        set_upload_music_error(res, safe_name, "has an invalid filename");
-        return -1;
-    }
-
-    char path[512];
-    make_music_path(safe_name, path, sizeof(path));
-    if (save_bytes(path, part->data, part->len) != 0) {
-        res->failed++;
-        set_upload_music_error(res, safe_name, "could not be saved");
-        return -1;
-    }
-
-    if (!res->first_file[0]) safe_str(res->first_file, sizeof(res->first_file), safe_name);
-    res->ok++;
-    return 0;
-}
-
-static void handle_upload_music(int client, char *body, size_t body_len, const char *ctype) {
-    const char *b = strstr(ctype ? ctype : "", "boundary=");
-    if (!b) {
-        http_send(client, "400 Bad Request", "text/plain", "Missing multipart boundary");
-        return;
-    }
-    b += 9;
-
-    ensure_dir(MUSIC_DIR);
-    struct upload_music_result res;
-    memset(&res, 0, sizeof(res));
-
-    int scanned = foreach_multipart_file(body, body_len, b, upload_music_part_cb, &res);
-    if (scanned < 0 || res.ok <= 0) {
-        http_send(client, "400 Bad Request", "text/plain", res.last_error[0] ? res.last_error : "No uploaded MP3 file found");
-        return;
-    }
-
-    invalidate_asset_list_cache(&g_music_list_cache);
-
-    if (res.failed > 0) {
-        app_log("music", "Uploaded %d MP3 file(s), %d skipped, first %s", res.ok, res.failed, res.first_file);
-    } else {
-        app_log("music", "Uploaded %d MP3 file(s), first %s", res.ok, res.first_file);
-    }
-    http_redirect(client, "/music");
-}
-
-static void handle_upload_font(int client, char *body, size_t body_len, const char *ctype) {
-    const char *b = strstr(ctype ? ctype : "", "boundary=");
-    if (!b) {
-        http_send(client, "400 Bad Request", "text/plain", "Missing multipart boundary");
-        return;
-    }
-    b += 9;
-
-    uint8_t *file_data = NULL;
-    size_t file_len = 0;
-    if (extract_multipart_file(body, body_len, b, &file_data, &file_len) != 0) {
-        http_send(client, "400 Bad Request", "text/plain", "No uploaded font found");
-        return;
-    }
-
-    char upload_name[160] = "";
-    char safe_name[128] = "";
-    extract_multipart_filename(body, body_len, b, upload_name, sizeof(upload_name));
-    sanitize_asset_filename(upload_name, safe_name, sizeof(safe_name), "uploaded_font.ttf");
-
-    if (!has_font_ext(safe_name)) {
-        http_send(client, "400 Bad Request", "text/plain", "Font must be .ttf or .otf");
-        return;
-    }
-
-    ensure_dir(FONT_DIR);
-    char path[512];
-    make_font_path(safe_name, path, sizeof(path));
-
-    if (save_bytes(path, file_data, file_len) != 0) {
-        http_send(client, "500 Internal Server Error", "text/plain", "Could not save font");
-        return;
-    }
-    invalidate_asset_list_cache(&g_font_list_cache);
-
-    char font_path[512];
-    make_font_path(safe_name, font_path, sizeof(font_path));
-    FT_Face test_face = NULL;
-    int ok = 0;
-
-    pthread_mutex_lock(&g_state.lock);
-    if (!g_state.ft_library) {
-        if (FT_Init_FreeType(&g_state.ft_library) != 0) g_state.ft_library = NULL;
-    }
-    if (g_state.ft_library && FT_New_Face(g_state.ft_library, font_path, 0, &test_face) == 0) {
-        ok = 1;
-        FT_Done_Face(test_face);
-    }
-    if (ok) {
-        safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), safe_name);
-        if (g_state.ft_face) {
-            FT_Done_Face(g_state.ft_face);
-            g_state.ft_face = NULL;
-        }
-        g_state.ft_loaded_file[0] = '\0';
-        g_state.ft_loaded_size = 0;
+        g_state.pending_message_face = face_id_valid_int(request->face_id) ? request->face_id : 1;
+        mp_safe_str(g_state.pending_message_face_file, sizeof(g_state.pending_message_face_file), face_file);
+        mp_safe_str(g_state.pending_message_text, sizeof(g_state.pending_message_text), message);
+        g_state.pending_message_at = now + (time_t)delay_seconds;
     }
     pthread_mutex_unlock(&g_state.lock);
 
-    if (!ok) {
-        unlink(path);
-        http_send(client, "400 Bad Request", "text/plain", "Uploaded file is not a readable TrueType/OpenType font");
-        return;
+    if (delay_seconds == 0) {
+        app_log("message", "Sent message with face %s: %.120s", face_file[0] ? face_file : "default", message);
+        return ipc_send_json(client, 200, "{\"ok\":true,\"mode\":\"message\",\"delay_seconds\":0}");
     }
 
-    pthread_mutex_lock(&g_state.lock);
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
+    app_log("message", "Scheduled message in %u seconds with face %s: %.120s",
+            delay_seconds, face_file[0] ? face_file : "default", message);
+    char response[192];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"mode\":\"scheduled-message\",\"delay_seconds\":%u,\"scheduled_for\":%lld}",
+             delay_seconds, (long long)(now + (time_t)delay_seconds));
+    return ipc_send_json(client, 200, response);
+}
 
+static int ipc_config_alarm(int client, const struct mp_ipc_alarm_config *request) {
+    int id = clamp_int(request->id, 1, MAX_ALARMS);
+    struct alarm_slot alarm = {
+        .enabled = request->enabled ? 1 : 0,
+        .hour = clamp_int(request->hour, 0, 23),
+        .min = clamp_int(request->minute, 0, 59),
+        .weekdays = request->weekdays ? request->weekdays : 0x7f,
+        .start_volume = clamp_int(request->start_volume, 0, 100),
+        .end_volume = clamp_int(request->end_volume, 0, 100),
+        .fired_yday = -1,
+        .music_file = ""
+    };
+    if (safe_asset_filename(request->music_file) && has_mp3_ext(request->music_file)) {
+        char path[512];
+        make_music_path(request->music_file, path, sizeof(path));
+        if (access(path, R_OK) == 0) mp_safe_str(alarm.music_file, sizeof(alarm.music_file), request->music_file);
+    }
+    pthread_mutex_lock(&g_state.lock);
+    g_state.alarms[id - 1] = alarm;
+    sync_legacy_alarm_fields_locked();
+    pthread_mutex_unlock(&g_state.lock);
     save_config();
-    app_log("fonts", "Uploaded font %s", safe_name);
-    http_redirect(client, "/display");
+    app_log("alarm", "Saved alarm %d", id);
+    return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
-static char *read_http_request(int client, size_t *out_len) {
-    size_t cap = 16384;
-    size_t len = 0;
-    char *buf = malloc(cap + 1);
-    if (!buf) return NULL;
+static int ipc_config_audio(int client, const struct mp_ipc_audio_config *request) {
+    int changed = 0;
+    int volume = -1;
+    int show_metadata = -1;
+    pthread_mutex_lock(&g_state.lock);
+    if (request->present_mask & MP_IPC_AUDIO_GLOBAL_VOLUME) {
+        volume = clamp_int(request->global_volume, 0, 100);
+        g_state.global_volume = volume;
+        changed = 1;
+    }
+    if (request->present_mask & MP_IPC_AUDIO_SHOW_METADATA) {
+        show_metadata = request->show_song_metadata ? 1 : 0;
+        g_state.show_song_metadata = show_metadata;
+        g_state.display_dirty = 1;
+        changed = 1;
+    }
+    pthread_mutex_unlock(&g_state.lock);
+    if (!changed)
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"no audio settings supplied\"}");
+    save_config();
+    if (volume >= 0) app_log("music", "Saved global volume %d%%", volume);
+    if (show_metadata >= 0) app_log("music", "Song metadata display %s", show_metadata ? "enabled" : "disabled");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
 
-    size_t header_end_pos = 0;
-    int content_length = 0;
+static int ipc_config_personalization(int client, const struct mp_ipc_personalization_config *request) {
+    char name[64];
+    mp_safe_str(name, sizeof(name), request->clock_name);
+    sanitize_clock_name(name);
+    pthread_mutex_lock(&g_state.lock);
+    mp_safe_str(g_state.clock_name, sizeof(g_state.clock_name), name);
+    pthread_mutex_unlock(&g_state.lock);
+    save_config();
+    app_log("settings", "Saved clock name %s", name);
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
 
-    while (len < HTTP_MAX_REQUEST) {
-        if (len == cap) {
-            cap *= 2;
-            if (cap > HTTP_MAX_REQUEST) cap = HTTP_MAX_REQUEST;
-            char *nb = realloc(buf, cap + 1);
-            if (!nb) {
-                free(buf);
-                return NULL;
-            }
-            buf = nb;
+static int ipc_config_display(int client, const struct mp_ipc_display_config *request) {
+    pthread_mutex_lock(&g_state.lock);
+    int font = g_state.oled_font;
+    int font_size = g_state.oled_font_size;
+    int bedtime_enabled = g_state.bedtime_enabled;
+    int bedtime_dim = g_state.bedtime_dim_percent;
+    int clock_mode = g_state.clock_24h_mode;
+    int bsh = g_state.bedtime_start_hour;
+    int bsm = g_state.bedtime_start_min;
+    int beh = g_state.bedtime_end_hour;
+    int bem = g_state.bedtime_end_min;
+    char font_file[128];
+    mp_safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
+    pthread_mutex_unlock(&g_state.lock);
+
+    if (request->present_mask & MP_IPC_DISPLAY_FONT) font = clamp_int(request->oled_font, 0, 3);
+    if (request->present_mask & MP_IPC_DISPLAY_FONT_SIZE) font_size = clamp_int(request->oled_font_size, 18, 54);
+    if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_ENABLED) bedtime_enabled = request->bedtime_enabled ? 1 : 0;
+    if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_DIM) bedtime_dim = clamp_int(request->bedtime_dim_percent, 0, 100);
+    if (request->present_mask & MP_IPC_DISPLAY_CLOCK_MODE) clock_mode = request->clock_24h_mode ? 1 : 0;
+    if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_START) {
+        bsh = clamp_int(request->bedtime_start_hour, 0, 23);
+        bsm = clamp_int(request->bedtime_start_minute, 0, 59);
+    }
+    if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_END) {
+        beh = clamp_int(request->bedtime_end_hour, 0, 23);
+        bem = clamp_int(request->bedtime_end_minute, 0, 59);
+    }
+    if (request->present_mask & MP_IPC_DISPLAY_FONT_FILE) {
+        font_file[0] = '\0';
+        if (request->oled_font_file[0] && safe_asset_filename(request->oled_font_file) && has_font_ext(request->oled_font_file)) {
+            char path[512];
+            make_font_path(request->oled_font_file, path, sizeof(path));
+            if (access(path, R_OK) == 0) mp_safe_str(font_file, sizeof(font_file), request->oled_font_file);
         }
+    }
 
-        ssize_t n = read(client, buf + len, cap - len);
-        if (n < 0) {
+    pthread_mutex_lock(&g_state.lock);
+    int changed = g_state.oled_font_size != font_size || strcmp(g_state.oled_font_file, font_file) != 0;
+    g_state.oled_font = font;
+    g_state.oled_font_size = font_size;
+    g_state.clock_24h_mode = clock_mode;
+    g_state.bedtime_enabled = bedtime_enabled;
+    g_state.bedtime_dim_percent = bedtime_dim;
+    g_state.bedtime_start_hour = bsh;
+    g_state.bedtime_start_min = bsm;
+    g_state.bedtime_end_hour = beh;
+    g_state.bedtime_end_min = bem;
+    mp_safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), font_file);
+    g_state.display_dirty = 1;
+    pthread_mutex_unlock(&g_state.lock);
+    if (changed) font_cache_reset();
+    save_config();
+    app_log("display", "Saved display settings");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
+
+static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
+    if (event->action == MP_IPC_ASSET_UPLOADED) {
+        if (event->kind == MP_IPC_ASSET_FACE) {
+            invalidate_normal_face_assets();
+            pthread_mutex_lock(&g_state.lock);
+            g_state.display_mode = 0;
+            mp_safe_str(g_state.current_face_file, sizeof(g_state.current_face_file), event->file);
+            mp_safe_str(g_state.preview_face_file, sizeof(g_state.preview_face_file), event->file);
+            g_state.preview_face_bedtime = 0;
+            g_state.preview_face_until = time(NULL) + CLOCK_FACE_PREVIEW_SECONDS;
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+        } else if (event->kind == MP_IPC_ASSET_BEDTIME_FACE) {
+            invalidate_bedtime_face_assets();
+            pthread_mutex_lock(&g_state.lock);
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+        } else if (event->kind == MP_IPC_ASSET_FONT) {
+            pthread_mutex_lock(&g_state.lock);
+            mp_safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), event->file);
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            font_cache_reset();
+            save_config();
+        }
+        app_log("assets", "Uploaded %u asset(s), first %s", event->count, event->file);
+    } else if (event->action == MP_IPC_ASSET_DELETED) {
+        if (event->kind == MP_IPC_ASSET_FACE || event->kind == MP_IPC_ASSET_BEDTIME_FACE) {
+            int bedtime = event->kind == MP_IPC_ASSET_BEDTIME_FACE;
+            if (bedtime) invalidate_bedtime_face_assets(); else invalidate_normal_face_assets();
+            pthread_mutex_lock(&g_state.lock);
+            if (!bedtime) {
+                if (strcmp(g_state.current_face_file, event->file) == 0) g_state.current_face_file[0] = '\0';
+                if (strcmp(g_state.message_face_file, event->file) == 0) g_state.message_face_file[0] = '\0';
+                if (strcmp(g_state.preview_face_file, event->file) == 0) g_state.preview_face_file[0] = '\0';
+            }
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+        } else if (event->kind == MP_IPC_ASSET_FONT) {
+            pthread_mutex_lock(&g_state.lock);
+            if (strcmp(g_state.oled_font_file, event->file) == 0) g_state.oled_font_file[0] = '\0';
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            font_cache_reset();
+            save_config();
+        }
+        app_log("assets", "Deleted asset %s", event->file);
+    } else if (event->action == MP_IPC_ASSET_DELETED_ALL) {
+        if (event->kind == MP_IPC_ASSET_FACE) {
+            invalidate_all_face_assets();
+            pthread_mutex_lock(&g_state.lock);
+            g_state.current_face_file[0] = '\0';
+            g_state.message_face_file[0] = '\0';
+            g_state.preview_face_file[0] = '\0';
+            g_state.preview_face_until = 0;
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+        } else if (event->kind == MP_IPC_ASSET_MUSIC) {
+            audio_stop();
+            pthread_mutex_lock(&g_state.lock);
+            g_state.audio_playing = 0;
+            g_state.audio_file[0] = '\0';
+            for (int i = 0; i < MAX_ALARMS; i++) g_state.alarms[i].music_file[0] = '\0';
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            save_config();
+        }
+        app_log("assets", "Deleted all assets of kind %u (%u files)", event->kind, event->count);
+    } else {
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid asset event\"}");
+    }
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
+
+static int ipc_asset_state(int client) {
+    struct mp_ipc_asset_state state;
+    memset(&state, 0, sizeof(state));
+    pthread_mutex_lock(&g_state.lock);
+    state.global_volume = g_state.global_volume;
+    state.builtin_font = g_state.oled_font;
+    state.font_size = g_state.oled_font_size;
+    mp_safe_str(state.current_music, sizeof(state.current_music), g_state.audio_file);
+    mp_safe_str(state.selected_font, sizeof(state.selected_font), g_state.oled_font_file);
+    pthread_mutex_unlock(&g_state.lock);
+    return ipc_send_response(client, 200, MP_IPC_CONTENT_BINARY, &state, sizeof(state));
+}
+
+static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t payload_len) {
+#define EXPECT(type) do { if (payload_len != sizeof(type)) return ipc_bad_payload(client); } while (0)
+    switch (opcode) {
+        case MP_IPC_OP_STATUS:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_status(client);
+        case MP_IPC_OP_DISPLAY_ACTION:
+            EXPECT(struct mp_ipc_display_action);
+            return ipc_display_action(client, payload);
+        case MP_IPC_OP_DISPLAY_FACE:
+            EXPECT(struct mp_ipc_display_face);
+            return ipc_display_face(client, payload);
+        case MP_IPC_OP_DISPLAY_MESSAGE:
+            EXPECT(struct mp_ipc_display_message);
+            return ipc_display_message(client, payload);
+        case MP_IPC_OP_MESSAGE_LIMITS:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_message_limits(client);
+        case MP_IPC_OP_MESSAGE_FIT:
+            EXPECT(struct mp_ipc_message_fit);
+            return ipc_message_fit(client, payload);
+        case MP_IPC_OP_CONFIG_ALARM:
+            EXPECT(struct mp_ipc_alarm_config);
+            return ipc_config_alarm(client, payload);
+        case MP_IPC_OP_CONFIG_AUDIO:
+            EXPECT(struct mp_ipc_audio_config);
+            return ipc_config_audio(client, payload);
+        case MP_IPC_OP_CONFIG_PERSONALIZATION:
+            EXPECT(struct mp_ipc_personalization_config);
+            return ipc_config_personalization(client, payload);
+        case MP_IPC_OP_CONFIG_DISPLAY:
+            EXPECT(struct mp_ipc_display_config);
+            return ipc_config_display(client, payload);
+        case MP_IPC_OP_LOGS_GET:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_logs_get(client);
+        case MP_IPC_OP_LOGS_CLEAR:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_logs_clear(client);
+        case MP_IPC_OP_ASSET_EVENT:
+            EXPECT(struct mp_ipc_asset_event);
+            return ipc_asset_event(client, payload);
+        case MP_IPC_OP_ASSET_STATE:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_asset_state(client);
+        case MP_IPC_OP_PING:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_send_json(client, 200, "{\"ok\":true}");
+        default:
+            return ipc_send_json(client, 404, "{\"ok\":false,\"error\":\"unknown IPC opcode\"}");
+    }
+#undef EXPECT
+}
+
+static void set_ipc_timeouts(int client) {
+    struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+    (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    int socket_buffer = (int)(MP_IPC_MAX_PAYLOAD * 2u);
+    (void)setsockopt(client, SOL_SOCKET, SO_RCVBUF, &socket_buffer, sizeof(socket_buffer));
+    (void)setsockopt(client, SOL_SOCKET, SO_SNDBUF, &socket_buffer, sizeof(socket_buffer));
+}
+
+static uid_t expected_api_uid(void) {
+    const char *value = getenv("MK_PICLOCK_API_USER");
+    if (!value || !*value) value = "mk-piclock-api";
+    char *end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (!errno && end != value && *end == '\0') return (uid_t)parsed;
+    struct passwd *entry = getpwnam(value);
+    return entry ? entry->pw_uid : (uid_t)-1;
+}
+
+static int ipc_peer_allowed(int client, uid_t api_uid) {
+#ifdef SO_PEERCRED
+    struct ucred credentials;
+    socklen_t length = sizeof(credentials);
+    if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &credentials, &length) != 0) return 0;
+    return credentials.uid == 0 || (api_uid != (uid_t)-1 && credentials.uid == api_uid);
+#else
+    (void)client;
+    (void)api_uid;
+    return 0;
+#endif
+}
+
+static ssize_t ipc_expected_payload_size(uint16_t opcode) {
+    switch (opcode) {
+        case MP_IPC_OP_STATUS:
+        case MP_IPC_OP_MESSAGE_LIMITS:
+        case MP_IPC_OP_LOGS_GET:
+        case MP_IPC_OP_LOGS_CLEAR:
+        case MP_IPC_OP_ASSET_STATE:
+        case MP_IPC_OP_PING:
+            return 0;
+        case MP_IPC_OP_DISPLAY_ACTION: return sizeof(struct mp_ipc_display_action);
+        case MP_IPC_OP_DISPLAY_FACE: return sizeof(struct mp_ipc_display_face);
+        case MP_IPC_OP_DISPLAY_MESSAGE: return sizeof(struct mp_ipc_display_message);
+        case MP_IPC_OP_MESSAGE_FIT: return sizeof(struct mp_ipc_message_fit);
+        case MP_IPC_OP_CONFIG_ALARM: return sizeof(struct mp_ipc_alarm_config);
+        case MP_IPC_OP_CONFIG_AUDIO: return sizeof(struct mp_ipc_audio_config);
+        case MP_IPC_OP_CONFIG_PERSONALIZATION: return sizeof(struct mp_ipc_personalization_config);
+        case MP_IPC_OP_CONFIG_DISPLAY: return sizeof(struct mp_ipc_display_config);
+        case MP_IPC_OP_ASSET_EVENT: return sizeof(struct mp_ipc_asset_event);
+        default: return -1;
+    }
+}
+
+static void handle_ipc_client(int client) {
+    void *packet = NULL;
+    size_t packet_len = 0;
+    if (mp_recv_packet_alloc(client, &packet,
+                             sizeof(struct mp_ipc_request_header) + MP_IPC_MAX_PAYLOAD,
+                             &packet_len) != 0 || packet_len < sizeof(struct mp_ipc_request_header)) {
+        free(packet);
+        return;
+    }
+    struct mp_ipc_request_header header;
+    memcpy(&header, packet, sizeof(header));
+    if (header.magic != MP_IPC_MAGIC) {
+        (void)ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid IPC magic\"}");
+        free(packet);
+        return;
+    }
+    if (header.version != MP_IPC_VERSION) {
+        (void)ipc_send_json(client, 409, "{\"ok\":false,\"error\":\"IPC protocol version mismatch\"}");
+        free(packet);
+        return;
+    }
+    ssize_t expected = ipc_expected_payload_size(header.opcode);
+    if (expected < 0) {
+        (void)ipc_send_json(client, 404, "{\"ok\":false,\"error\":\"unknown IPC opcode\"}");
+        free(packet);
+        return;
+    }
+    if (header.payload_len != (uint32_t)expected ||
+        packet_len != sizeof(header) + header.payload_len) {
+        (void)ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid IPC payload length\"}");
+        free(packet);
+        return;
+    }
+    const void *payload = header.payload_len
+        ? (const unsigned char *)packet + sizeof(header) : NULL;
+    (void)ipc_dispatch(client, header.opcode, payload, header.payload_len);
+    free(packet);
+}
+
+static void *ipc_thread_main(void *arg) {
+    (void)arg;
+    if (mkdir(CORE_RUNTIME_DIR, 0770) != 0 && errno != EEXIST) {
+        perror("mkdir core runtime");
+        return NULL;
+    }
+    uid_t api_uid = expected_api_uid();
+    if (api_uid == (uid_t)-1)
+        fprintf(stderr, "warning: mk-piclock-api user not found; only root IPC peers will be accepted\n");
+    int server = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (server < 0) {
+        perror("core socket");
+        return NULL;
+    }
+    int socket_buffer = (int)(MP_IPC_MAX_PAYLOAD * 2u);
+    (void)setsockopt(server, SOL_SOCKET, SO_RCVBUF, &socket_buffer, sizeof(socket_buffer));
+    (void)setsockopt(server, SOL_SOCKET, SO_SNDBUF, &socket_buffer, sizeof(socket_buffer));
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    if (strlen(CORE_SOCKET_PATH) >= sizeof(addr.sun_path)) {
+        close(server);
+        return NULL;
+    }
+    mp_safe_str(addr.sun_path, sizeof(addr.sun_path), CORE_SOCKET_PATH);
+    unlink(CORE_SOCKET_PATH);
+    if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        chmod(CORE_SOCKET_PATH, 0660) != 0 || listen(server, 8) != 0) {
+        perror("bind/listen core IPC");
+        close(server);
+        unlink(CORE_SOCKET_PATH);
+        return NULL;
+    }
+    fprintf(stderr, "private SOCK_SEQPACKET IPC listening on %s\n", CORE_SOCKET_PATH);
+    while (g_running) {
+        struct pollfd pfd = {.fd = server, .events = POLLIN};
+        int ready = poll(&pfd, 1, 500);
+        if (ready < 0) {
             if (errno == EINTR) continue;
-            free(buf);
-            return NULL;
+            break;
         }
-        if (n == 0) break;
-        len += (size_t)n;
-        buf[len] = '\0';
-
-        if (header_end_pos == 0) {
-            char *he = strstr(buf, "\r\n\r\n");
-            if (he) {
-                header_end_pos = (size_t)(he - buf) + 4;
-                char *cl = strcasestr(buf, "Content-Length:");
-                if (cl && (size_t)(cl - buf) < header_end_pos) {
-                    cl += strlen("Content-Length:");
-                    while (*cl == ' ' || *cl == '\t') cl++;
-                    content_length = atoi(cl);
-                    if (content_length < 0 || content_length > HTTP_MAX_REQUEST) {
-                        free(buf);
-                        return NULL;
-                    }
-                }
-            }
+        if (ready == 0 || !(pfd.revents & POLLIN)) continue;
+        int client = accept4(server, NULL, NULL, SOCK_CLOEXEC);
+        if (client < 0) {
+            if (errno == EINTR) continue;
+            break;
         }
-
-        if (header_end_pos > 0) {
-            size_t need = header_end_pos + (size_t)content_length;
-            if (len >= need) break;
+        set_ipc_timeouts(client);
+        if (!ipc_peer_allowed(client, api_uid)) {
+            (void)ipc_send_json(client, 403, "{\"ok\":false,\"error\":\"IPC peer rejected\"}");
+            close(client);
+            continue;
         }
-    }
-
-    buf[len] = '\0';
-    *out_len = len;
-    return buf;
-}
-
-static void handle_client(int client);
-
-static void set_client_socket_timeouts(int client) {
-    struct timeval tv;
-    tv.tv_sec = HTTP_SOCKET_TIMEOUT_SEC;
-    tv.tv_usec = 0;
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
-static int http_worker_try_acquire(void) {
-    int ok = 0;
-    pthread_mutex_lock(&g_http_worker_lock);
-    if (g_http_active_workers < HTTP_MAX_WORKERS) {
-        g_http_active_workers++;
-        ok = 1;
-    }
-    pthread_mutex_unlock(&g_http_worker_lock);
-    return ok;
-}
-
-static void http_worker_release(void) {
-    pthread_mutex_lock(&g_http_worker_lock);
-    if (g_http_active_workers > 0) g_http_active_workers--;
-    pthread_mutex_unlock(&g_http_worker_lock);
-}
-
-static void *http_client_thread_main(void *arg) {
-    int client = (int)(intptr_t)arg;
-
-    if (client >= 0) {
-        handle_client(client);
+        handle_ipc_client(client);
         close(client);
     }
-
-    http_worker_release();
-    return NULL;
-}
-
-typedef struct {
-    int client;
-    const char *method;
-    const char *path;
-    const char *query;
-    char *body;
-    size_t body_len;
-    const char *ctype;
-} http_request_t;
-
-typedef void (*route_handler_t)(const http_request_t *req);
-
-struct http_route {
-    const char *method;
-    const char *path;
-    route_handler_t handler;
-};
-
-/* --- Pure Client Socket Adapters --- */
-static void adapter_client(const http_request_t *req, void (*real_handler)(int)) {
-    real_handler(req->client);
-}
-
-static void route_status_json(const http_request_t *req)        { adapter_client(req, send_status_json); }
-static void route_fonts_json(const http_request_t *req)         { adapter_client(req, send_fonts_json); }
-static void route_music_json(const http_request_t *req)         { adapter_client(req, send_music_json); }
-static void route_message_limit(const http_request_t *req)      { adapter_client(req, send_message_limit_json); }
-static void route_log_json(const http_request_t *req)           { adapter_client(req, send_log_json); }
-static void route_clear_log(const http_request_t *req)          { adapter_client(req, handle_clear_log); }
-
-/* --- Query Parameter Adapters --- */
-static void adapter_query(const http_request_t *req, void (*real_handler)(int, const char *)) {
-    real_handler(req->client, req->query);
-}
-
-static void route_faces_json(const http_request_t *req)         { adapter_query(req, send_faces_json); }
-static void route_face_source(const http_request_t *req)        { adapter_query(req, handle_face_source_png); }
-static void route_font_file(const http_request_t *req)          { adapter_query(req, handle_font_file); }
-static void route_message_fit(const http_request_t *req)        { adapter_query(req, send_message_fit_json); }
-static void route_handle_action(const http_request_t *req)      { adapter_query(req, handle_action); }
-static void route_handle_show_face(const http_request_t *req)   { adapter_query(req, handle_show_face); }
-
-/* --- POST/Form Body Adapters --- */
-static void adapter_body(const http_request_t *req, void (*real_handler)(int, char *)) {
-    real_handler(req->client, req->body);
-}
-
-static void route_save_alarm(const http_request_t *req)         { adapter_body(req, handle_save_alarm); }
-static void route_save_audio(const http_request_t *req)         { adapter_body(req, handle_save_audio); }
-static void route_save_personalization(const http_request_t *req) { adapter_body(req, handle_save_personalization); }
-static void route_save_display(const http_request_t *req)       { adapter_body(req, handle_save_display); }
-static void route_delete_font(const http_request_t *req)        { adapter_body(req, handle_delete_font); }
-static void route_delete_face(const http_request_t *req)        { adapter_body(req, handle_delete_face); }
-static void route_show_message(const http_request_t *req)       { adapter_body(req, handle_show_message); }
-
-/* --- Consolidated Asset Deletion Adapters --- */
-static void route_delete_all_faces(const http_request_t *req)   { handle_delete_assets(req->client, req->body, "faces"); }
-static void route_delete_all_music(const http_request_t *req)   { handle_delete_assets(req->client, req->body, "music"); }
-
-/* --- Multipart/Binary Upload Adapters --- */
-static void adapter_upload_query(const http_request_t *req, void (*real_handler)(int, const char *, char *, size_t, const char *)) {
-    real_handler(req->client, req->query, req->body, req->body_len, req->ctype);
-}
-
-static void adapter_upload_body(const http_request_t *req, void (*real_handler)(int, char *, size_t, const char *)) {
-    real_handler(req->client, req->body, req->body_len, req->ctype);
-}
-
-static void route_upload_face(const http_request_t *req)        { adapter_upload_query(req, handle_upload_face); }
-static void route_upload_bedtime(const http_request_t *req)     { adapter_upload_query(req, handle_upload_bedtime_face); }
-static void route_upload_music(const http_request_t *req)       { adapter_upload_body(req, handle_upload_music); }
-static void route_upload_font(const http_request_t *req)        { adapter_upload_body(req, handle_upload_font); }
-
-static const struct http_route routes[] = {
-    /* Status & Asset API JSON targets */
-    {"GET",  "/api/status",         route_status_json},
-    {"GET",  "/api/faces",          route_faces_json},
-    {"GET",  "/api/fonts",          route_fonts_json},
-    {"GET",  "/api/music",          route_music_json},
-    {"GET",  "/api/message-limit",  route_message_limit},
-    {"GET",  "/api/message-fit",    route_message_fit},
-    {"GET",  "/api/log",            route_log_json},
-    {"GET",  "/face-source",        route_face_source},
-    {"GET",  "/font-file",          route_font_file},
-
-    /* Config & Device Interactions */
-    {"GET",  "/action",             route_handle_action},
-    {"GET",  "/face",               route_handle_show_face},
-    {"POST", "/save-alarm",         route_save_alarm},
-    {"POST", "/save-audio",         route_save_audio},
-    {"POST", "/save-personalization", route_save_personalization},
-    {"POST", "/save-display",       route_save_display},
-    {"POST", "/show-message",       route_show_message},
-    {"POST", "/message",            route_show_message},
-    {"POST", "/clear-log",          route_clear_log},
-
-    /* Destruction & Deletions */
-    {"POST", "/delete-font",        route_delete_font},
-    {"POST", "/delete-face",        route_delete_face},
-    {"POST", "/delete-all-faces",   route_delete_all_faces},
-    {"POST", "/delete-all-music",   route_delete_all_music},
-
-    /* Asset Binary Storage Uploads */
-    {"POST", "/upload-face",         route_upload_face},
-    {"POST", "/upload-bedtime-face", route_upload_bedtime},
-    {"POST", "/upload-music",        route_upload_music},
-    {"POST", "/upload-font",         route_upload_font}
-};
-
-struct static_file_route {
-    const char *path;
-    const char *file;
-    const char *ctype;
-};
-
-struct static_view {
-    const char *path;
-    const char *file;
-};
-
-static const struct static_file_route static_files[] = {
-    {"/style.css", "style.css", "text/css; charset=utf-8"},
-    {"/app.js",    "app.js",    "application/javascript; charset=utf-8"}
-};
-
-static const struct static_view static_views[] = {
-    {"/",              "index.html"},
-    {"/index.html",    "index.html"},
-    {"/faces",         "index.html"},
-    {"/faces.html",    "index.html"},
-    {"/fonts",         "index.html"},
-    {"/fonts.html",    "index.html"},
-    {"/music",         "index.html"},
-    {"/music.html",    "index.html"},
-    {"/alarm",         "index.html"},
-    {"/alarm.html",    "index.html"},
-    {"/display",       "index.html"},
-    {"/display.html",  "index.html"},
-    {"/message",       "index.html"},
-    {"/messages",      "index.html"},
-    {"/message.html",  "index.html"},
-    {"/messages.html", "index.html"},
-    {"/log",           "index.html"},
-    {"/log.html",      "index.html"}
-};
-
-static int send_static_ui_route(int client, const char *method, const char *path) {
-    if (strcmp(method, "GET") != 0) return 0;
-
-    size_t num_files = sizeof(static_files) / sizeof(static_files[0]);
-    for (size_t i = 0; i < num_files; i++) {
-        if (strcmp(path, static_files[i].path) == 0) {
-            char file_path[512];
-            snprintf(file_path, sizeof(file_path), WEB_DIR "/%s", static_files[i].file);
-            http_send_file(client, file_path, static_files[i].ctype);
-            return 1;
-        }
-    }
-
-    size_t num_views = sizeof(static_views) / sizeof(static_views[0]);
-    for (size_t i = 0; i < num_views; i++) {
-        if (strcmp(path, static_views[i].path) == 0) {
-            send_static_page(client, static_views[i].file);
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-static void handle_client(int client) {
-    size_t req_len = 0;
-    char *req = read_http_request(client, &req_len);
-    if (!req) return;
-
-    char method[8] = "";
-    char target[512] = "";
-    sscanf(req, "%7s %511s", method, target);
-
-    char *headers_end = strstr(req, "\r\n\r\n");
-    char *body = headers_end ? headers_end + 4 : NULL;
-    size_t body_len = headers_end ? req_len - (size_t)(body - req) : 0;
-
-    char ctype[512] = "";
-    char *ct = strcasestr(req, "Content-Type:");
-    if (ct && headers_end && ct < headers_end) {
-        ct += strlen("Content-Type:");
-        while (*ct == ' ' || *ct == '\t') ct++;
-        char *eol = strstr(ct, "\r\n");
-        if (eol) {
-            size_t n = (size_t)(eol - ct);
-            if (n >= sizeof(ctype)) n = sizeof(ctype) - 1;
-            memcpy(ctype, ct, n);
-            ctype[n] = 0;
-        }
-    }
-
-    char path[512];
-    char *query = NULL;
-    safe_str(path, sizeof(path), target);
-    char *q = strchr(path, '?');
-    if (q) {
-        *q = '\0';
-        query = q + 1;
-    }
-
-    http_request_t request = {
-        .client = client,
-        .method = method,
-        .path = path,
-        .query = query,
-        .body = body,
-        .body_len = body_len,
-        .ctype = ctype
-    };
-
-    int route_matched = 0;
-    size_t num_routes = sizeof(routes) / sizeof(routes[0]);
-    for (size_t i = 0; i < num_routes; i++) {
-        if (strcmp(request.method, routes[i].method) == 0 && strcmp(request.path, routes[i].path) == 0) {
-            routes[i].handler(&request);
-            route_matched = 1;
-            break;
-        }
-    }
-
-    if (!route_matched && !send_static_ui_route(client, method, path)) {
-        http_send(client, "404 Not Found", "text/plain", "Not Found");
-    }
-
-    free(req);
-}
-
-static void *http_thread_main(void *arg) {
-    (void)arg;
-    int server = socket(AF_INET, SOCK_STREAM, 0);
-    if (server < 0) {
-        perror("socket");
-        return NULL;
-    }
-
-    int yes = 1;
-    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons((uint16_t)HTTP_PORT);
-
-    if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        perror("bind");
-        close(server);
-        return NULL;
-    }
-    if (listen(server, 8) != 0) {
-        perror("listen");
-        close(server);
-        return NULL;
-    }
-
-    fprintf(stderr, "web gui listening on port %d\n", HTTP_PORT);
-
-    while (g_running) {
-        struct pollfd pfd;
-        memset(&pfd, 0, sizeof(pfd));
-        pfd.fd = server;
-        pfd.events = POLLIN;
-
-        int pr = poll(&pfd, 1, HTTP_ACCEPT_POLL_MS);
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            perror("poll");
-            break;
-        }
-        if (pr == 0) continue;
-        if (!(pfd.revents & POLLIN)) continue;
-
-        struct sockaddr_in peer;
-        socklen_t peer_len = sizeof(peer);
-        int client = accept(server, (struct sockaddr *)&peer, &peer_len);
-        if (client < 0) {
-            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            perror("accept");
-            break;
-        }
-
-        set_client_socket_timeouts(client);
-
-        if (!http_worker_try_acquire()) {
-            app_log("http", "Rejected client: worker limit reached");
-            close(client);
-            continue;
-        }
-
-        pthread_t client_thread;
-        if (pthread_create(&client_thread, NULL, http_client_thread_main, (void *)(intptr_t)client) != 0) {
-            http_worker_release();
-            close(client);
-            continue;
-        }
-        pthread_detach(client_thread);
-    }
-
     close(server);
+    unlink(CORE_SOCKET_PATH);
     return NULL;
 }
+
 
 /* ---------------- Main loop ---------------- */
 
@@ -5273,11 +4196,14 @@ int main(void) {
     ensure_dir(BEDTIME_FACE_DIR);
     ensure_dir(MUSIC_DIR);
     ensure_dir(FONT_DIR);
-    ensure_dir(WEB_DIR);
     ensure_dir(CONFIG_DIR);
     init_alarm_defaults();
     load_config();
     app_log("system", "mk-piclock %s starting", APP_VERSION);
+
+    int touch_available = (touch_init() == 0);
+    if (touch_available) app_log("system", "TTP223B touch input initialized on GPIO %d", GPIO_TOUCH);
+    else app_log("system", "TTP223B touch input unavailable on GPIO %d", GPIO_TOUCH);
 
     if (oled_init() == 0) {
         pthread_mutex_lock(&g_state.lock);
@@ -5288,14 +4214,25 @@ int main(void) {
         sleep(STARTUP_GREETING_SECONDS);
         draw_clock_screen();
     } else {
-        app_log("system", "OLED init failed, web server will still start");
-        fprintf(stderr, "OLED init failed, web server will still start\n");
+        app_log("system", "OLED init failed, core IPC will still start");
+        fprintf(stderr, "OLED init failed, core IPC will still start\n");
     }
 
-    pthread_t http_thread;
-    app_log("system", "Web GUI listening on port %d", HTTP_PORT);
+    pthread_t ipc_thread;
+    pthread_t touch_thread;
+    int touch_thread_started = 0;
+    app_log("system", "Private core IPC listening on %s", CORE_SOCKET_PATH);
 
-    if (pthread_create(&http_thread, NULL, http_thread_main, NULL) != 0) {
+    if (touch_available) {
+        if (pthread_create(&touch_thread, NULL, touch_thread_main, NULL) == 0) {
+            touch_thread_started = 1;
+        } else {
+            app_log("system", "Unable to start touch input thread");
+            touch_close();
+        }
+    }
+
+    if (pthread_create(&ipc_thread, NULL, ipc_thread_main, NULL) != 0) {
         perror("pthread_create");
         return 1;
     }
@@ -5307,6 +4244,7 @@ int main(void) {
     char last_face_file[FACE_FILE_MAX] = "";
     while (g_running) {
         check_alarm();
+        activate_pending_message_if_due();
         apply_bedtime_brightness();
 
         pthread_mutex_lock(&g_state.lock);
@@ -5354,6 +4292,8 @@ int main(void) {
                     last_min = tmv.tm_min;
                     last_colon_phase = colon_phase;
                     draw_clock_screen();
+                } else if (song_metadata_scroll_active()) {
+                    refresh_clock_footer();
                 }
             } else if (mode == 1) {
                 if (dirty || mode != last_mode) {
@@ -5374,10 +4314,12 @@ int main(void) {
         usleep(250000);
     }
 
-    audio_stop();
-    pthread_mutex_lock(&g_state.lock);
+    if (touch_thread_started) pthread_join(touch_thread, NULL);
+    touch_close();
+    (void)audio_stop_and_wait(3000u);
+    pthread_mutex_lock(&g_font.lock);
     font_cache_close_locked();
-    pthread_mutex_unlock(&g_state.lock);
+    pthread_mutex_unlock(&g_font.lock);
     oled_close();
     mpg123_exit();
     return 0;

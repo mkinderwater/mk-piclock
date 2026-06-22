@@ -94,9 +94,11 @@ MAX98357A VIN -> Pi 5 V, physical pin 2
 MAX98357A GND -> Pi GND, physical pin 14
 ```
 
-Pins 2 and 4 are electrically the same Raspberry Pi 5 V rail, while all ground pins are common. Use a regulated supply sized for the Pi, OLED, amplifier, and speaker load. Do not connect USB power while the header supply is connected.
+Pins 2 and 4 are electrically connected to the same Raspberry Pi 5 V rail. All ground pins are common.
 
-## 4. Enable SPI and MAX98357A audio
+Use a regulated supply sized for the Pi, OLED, amplifier, and speaker load. Do not connect USB power while the GPIO-header supply is connected.
+
+## 4. Configure boot firmware
 
 Edit:
 
@@ -104,22 +106,20 @@ Edit:
 sudo nano /boot/firmware/config.txt
 ```
 
-Ensure these entries exist once:
+Under the existing `[all]` section, ensure these entries exist once:
 
 ```ini
+[all]
+
 dtparam=spi=on
 dtparam=audio=off
 dtoverlay=max98357a,no-sdmode
+
+# Headless appliance. Reserve the minimum GPU memory.
 gpu_mem=16
 ```
 
-Reduce the GPU memory reservation because this headless clock does not use the desktop or 3D graphics:
-
-```bash
-sudo raspi-config
-```
-
-Navigate to **Performance Options** (or **Advanced Options** on older OS versions) > **GPU Memory**. Set the value to **16 MB**. There is no need to reserve 64 MB for a GPU workload the clock does not use.
+Do not add a second `[all]` section when one already exists.
 
 Save and reboot:
 
@@ -127,27 +127,36 @@ Save and reboot:
 sudo reboot
 ```
 
-## 5. Verify hardware interfaces
+## 5. Connect and verify hardware
 
-After reconnecting:
+### Confirmed SSD1322 OLED wiring
 
-```bash
-ls -l /dev/spidev0.0
-ls -l /dev/gpiochip0
-gpiodetect
-aplay -l
-```
+This wiring is confirmed working with the smaller 3.12-inch 256×64 SSD1322 OLED used by mk-piclock:
+
+| OLED pin | Signal | Raspberry Pi |
+| ---: | --- | --- |
+| 1 | VSS | GND, physical pin 6 |
+| 2 | VCC_IN | 3.3 V, physical pin 1 |
+| 4 | D0 / CLK | GPIO11 / SPI0 SCLK, physical pin 23 |
+| 5 | D1 / DIN | GPIO10 / SPI0 MOSI, physical pin 19 |
+| 14 | D/C# | GPIO25, physical pin 22 |
+| 15 | RES# | GPIO27, physical pin 13 |
+| 16 | CS# | GPIO8 / SPI0 CE0, physical pin 24 |
+
+Treat this table as the authoritative OLED wiring.
+
+Do not substitute the discarded GPIO27/GPIO24 test mapping.
 
 The core expects:
 
 ```text
-SPI:       /dev/spidev0.0
-GPIO chip: /dev/gpiochip0
-OLED DC:   GPIO 25
-OLED RST:  GPIO 27
-Touch OUT: GPIO 20, physical pin 38
-Audio:     ALSA device "default"
+SPI device: /dev/spidev0.0
+OLED CS:    GPIO8 / SPI0 CE0, physical pin 24
+OLED DC:    GPIO25, physical pin 22
+OLED RST:   GPIO27, physical pin 13
 ```
+
+The OLED does not use SPI MISO. Connect only the OLED pins listed above.
 
 ### TTP223B wiring
 
@@ -159,14 +168,60 @@ TTP223B GND -> Pi GND, physical pin 39
 TTP223B OUT -> Pi GPIO20, physical pin 38
 ```
 
-The core treats the TTP223B output as active-high and applies software debounce. Do not power the module from 5 V when its output is connected directly to the Raspberry Pi GPIO.
+The core treats the TTP223B output as active-high and applies software debounce.
+
+Do not power the module from 5 V while its output is connected directly to a Raspberry Pi GPIO.
 
 Touch actions:
 
 ```text
-Short press: stop the current song
+Short press:   stop the current song
 Hold 3 seconds: play a random uploaded song
 ```
+
+### MAX98357A wiring
+
+```text
+MAX98357A VIN            -> Pi 5 V, physical pin 2
+MAX98357A GND            -> Pi GND, physical pin 14
+MAX98357A BCLK           -> Pi GPIO18, physical pin 12
+MAX98357A LRC/LRCLK/WS   -> Pi GPIO19, physical pin 35
+MAX98357A DIN            -> Pi GPIO21, physical pin 40
+MAX98357A SD/EN          -> Not connected
+```
+
+Connect the speaker only to the amplifier:
+
+```text
+MAX98357A SPK+ -> Speaker +
+MAX98357A SPK- -> Speaker -
+```
+
+Do not connect either speaker terminal to Raspberry Pi ground.
+
+### Verify interfaces
+
+After reconnecting:
+
+```bash
+ls -l /dev/spidev0.0
+ls -l /dev/gpiochip0
+gpiodetect
+aplay -l
+```
+
+Expected hardware interfaces:
+
+```text
+SPI:       /dev/spidev0.0
+GPIO chip: /dev/gpiochip0
+OLED DC:   GPIO25
+OLED RST:  GPIO27
+Touch OUT: GPIO20, physical pin 38
+Audio:     ALSA device "default"
+```
+
+Do not continue until `/dev/spidev0.0` and `/dev/gpiochip0` exist and ALSA lists the I2S audio device.
 
 ## 6. Build
 
@@ -226,7 +281,9 @@ systemctl disable --now mk-piclock.service
 ## 8. Start and verify services
 
 ```bash
-sudo systemctl restart mk-piclock-core.service mk-piclock-api.service
+sudo systemctl restart \
+  mk-piclock-core.service \
+  mk-piclock-api.service
 ```
 
 Check status:
@@ -240,7 +297,9 @@ sudo systemctl --no-pager --full status \
 Confirm both start at boot:
 
 ```bash
-systemctl is-enabled mk-piclock-core.service mk-piclock-api.service
+systemctl is-enabled \
+  mk-piclock-core.service \
+  mk-piclock-api.service
 ```
 
 Expected:
@@ -271,7 +330,8 @@ Port `8080` is required unless `MK_PICLOCK_API_PORT` is changed.
 Read touch status:
 
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/status | grep -o '"touch_[^"]*"[^,}]*'
+curl -s http://127.0.0.1:8080/api/v1/status \
+  | grep -o '"touch_[^"]*"[^,}]*'
 ```
 
 Expected while idle:
@@ -291,9 +351,14 @@ Functional test:
 3. Hold the sensor for three seconds and confirm a random uploaded song starts.
 4. Confirm `Title - Artist` appears on the clock when song metadata display is enabled.
 
+Open each GUI page and perform a safe action. The notice bar should describe the exact result, such as:
 
-Open each GUI page and perform a safe action. The notice bar should describe the exact result, such as `Playing <title>`, `Screen cleared`, `Alarm 1 saved`, or `Message scheduled in 10 seconds`.
-
+```text
+Playing <title>
+Screen cleared
+Alarm 1 saved
+Message scheduled in 10 seconds
+```
 
 List music and ID3 metadata:
 
@@ -301,7 +366,7 @@ List music and ID3 metadata:
 curl -s http://127.0.0.1:8080/api/v1/assets/music
 ```
 
-The response includes both the legacy `files` array and a `tracks` array containing:
+The response includes the legacy `files` array and a `tracks` array containing:
 
 ```text
 file
@@ -348,7 +413,9 @@ make install
 sudo systemctl restart mk-piclock-core mk-piclock-api
 ```
 
-Existing faces, music, fonts, alarms, clock name, display settings, and volume are retained. The new `show_song_metadata` setting defaults to enabled until saved otherwise.
+Existing faces, music, fonts, alarms, clock name, display settings, and volume are retained.
+
+The `show_song_metadata` setting defaults to enabled until saved otherwise.
 
 Upgrade the API and core together so their product versions remain aligned. Releases v1.6.5 and earlier must upgrade both programs because v1.6.6 introduced binary IPC protocol version 4.
 
@@ -381,18 +448,36 @@ Refresh the browser. Disabled modules are removed from the menu and their HTML, 
 
 ## Logs
 
-```bash
-sudo journalctl -b -u mk-piclock-core.service -n 100 --no-pager
-sudo journalctl -b -u mk-piclock-api.service -n 100 --no-pager
-```
-
-Follow logs live:
+Core logs:
 
 ```bash
-sudo journalctl -f -u mk-piclock-core.service -u mk-piclock-api.service
+sudo journalctl \
+  -b \
+  -u mk-piclock-core.service \
+  -n 100 \
+  --no-pager
 ```
 
-## Common build problems
+API logs:
+
+```bash
+sudo journalctl \
+  -b \
+  -u mk-piclock-api.service \
+  -n 100 \
+  --no-pager
+```
+
+Follow both services:
+
+```bash
+sudo journalctl \
+  -f \
+  -u mk-piclock-core.service \
+  -u mk-piclock-api.service
+```
+
+## Common build and hardware problems
 
 ### `microhttpd.h: No such file or directory`
 
@@ -407,14 +492,19 @@ make -j2
 
 ### libmicrohttpd status-name warnings
 
-v1.6.10 uses the non-deprecated status names:
+v1.6.10 uses:
 
 ```text
 MHD_HTTP_URI_TOO_LONG
 MHD_HTTP_CONTENT_TOO_LARGE
 ```
 
-Run `make clean` before rebuilding so an older object or binary is not reused.
+Run a clean build so older objects are not reused:
+
+```bash
+make clean
+make -j2
+```
 
 ### `gpiod_*` declarations are missing
 
@@ -426,21 +516,72 @@ pkg-config --modversion libgpiod
 
 It must be 2.x.
 
-### API is offline
+### `/dev/spidev0.0` is missing
+
+Confirm SPI is enabled:
 
 ```bash
-sudo systemctl restart mk-piclock-core mk-piclock-api
-sudo journalctl -b -u mk-piclock-api -n 100 --no-pager
+grep -n '^[[:space:]]*dtparam=spi=on' \
+  /boot/firmware/config.txt
 ```
 
-### Core cannot open the OLED
+Then reboot:
+
+```bash
+sudo reboot
+```
+
+### `/dev/gpiochip0` is missing
+
+```bash
+gpiodetect
+ls -l /dev/gpiochip*
+```
+
+The current source expects `/dev/gpiochip0`.
+
+### OLED remains blank
+
+Confirm the authoritative wiring:
+
+```text
+OLED pin 1  VSS     -> Pi GND, physical pin 6
+OLED pin 2  VCC_IN  -> Pi 3.3 V, physical pin 1
+OLED pin 4  D0/CLK  -> Pi GPIO11, physical pin 23
+OLED pin 5  D1/DIN  -> Pi GPIO10, physical pin 19
+OLED pin 14 D/C#    -> Pi GPIO25, physical pin 22
+OLED pin 15 RES#    -> Pi GPIO27, physical pin 13
+OLED pin 16 CS#     -> Pi GPIO8 / CE0, physical pin 24
+```
+
+Confirm the service has access to SPI and GPIO:
 
 ```bash
 ls -l /dev/spidev0.0 /dev/gpiochip0
 id mk-piclock-core
 ```
 
-Confirm SPI is enabled and the service user belongs to the required hardware groups.
+Check the core log:
+
+```bash
+sudo journalctl \
+  -b \
+  -u mk-piclock-core.service \
+  -n 100 \
+  --no-pager
+```
+
+### API is offline
+
+```bash
+sudo systemctl restart mk-piclock-core mk-piclock-api
+
+sudo journalctl \
+  -b \
+  -u mk-piclock-api.service \
+  -n 100 \
+  --no-pager
+```
 
 ### No audio
 
@@ -450,3 +591,22 @@ speaker-test -D default -c 2 -t sine
 ```
 
 Stop the test with `Ctrl+C`.
+
+Confirm the boot settings:
+
+```bash
+grep -nE \
+  '^[[:space:]]*(dtparam=audio=off|dtoverlay=max98357a,no-sdmode)' \
+  /boot/firmware/config.txt
+```
+
+### Incorrect GPU memory reservation
+
+Confirm the headless setting exists once:
+
+```bash
+grep -n '^[[:space:]]*gpu_mem=16' \
+  /boot/firmware/config.txt
+```
+
+A reboot is required after changing firmware configuration.

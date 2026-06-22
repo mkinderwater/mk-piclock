@@ -110,6 +110,7 @@ Ensure these entries exist once:
 dtparam=spi=on
 dtparam=audio=off
 dtoverlay=max98357a,no-sdmode
+gpu_mem=16
 ```
 
 Reduce the GPU memory reservation because this headless clock does not use the desktop or 3D graphics:

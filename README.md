@@ -1,6 +1,6 @@
-# mk-piclock v1.6.10
+# mk-piclock v1.6.19
 
-Native C alarm clock software for a Raspberry Pi, SSD1322 256x64 OLED, and MAX98357A I2S audio.
+Created for my daughter Rylie, mk-piclock is native C alarm clock software for a Raspberry Pi, SSD1322 256x64 OLED, and MAX98357A I2S audio.
 
 Hardware wiring: see [`pinouts.md`](pinouts.md).
 
@@ -25,40 +25,88 @@ HTTP ends at `mk-piclock-api`. The core contains no HTTP, URL, query-string, mul
 
 The API has no authentication and is intended for a trusted LAN. CORS remains disabled unless one exact origin is configured.
 
+## v1.6.19 changes
+
+### Live Dashboard preview
+
+* Adds a live Dashboard preview of the physical OLED screen.
+* Updates the preview once per second.
+* Aligns preview updates with the system clock.
+* Makes the preview brighter and closer to the appearance of the physical OLED.
+* Mirrors the current clock layout, date, image, status indicators, alarm state, and music information.
+* Displays playing-song metadata in the live preview.
+* Scrolls `Title - Artist` only when the text exceeds the available width.
+* Keeps song metadata stationary when it fits.
+* Pauses Dashboard polling when the Dashboard is not visible.
+
+### GUI changes
+
+* Adds the clock name to the GUI header and browser title.
+* Keeps the displayed clock name current after configuration changes.
+* Adds Yellow, Green, and White display-color options.
+* Applies the selected display color to the Dashboard, message, and font previews.
+* Removes continuous status polling from configuration pages.
+* Limits continuous status polling to the Dashboard.
+* Prevents Alarm, Display, Music, Message, Images, Bedtime Images, and Log forms from being rebuilt while they are being edited.
+* Fixes alarm-setting changes being interrupted or discarded by background GUI refreshes.
+* Improves incomplete-update warnings by comparing the GUI, API, core, and IPC versions.
+
+### Images
+
+* Replaces the previous **Faces** terminology with **Images** throughout the GUI.
+* Renames the **Faces** menu and page to **Images**.
+* Renames bedtime faces to **Bedtime Images**.
+* Gives Images and Bedtime Images separate menu entries and pages.
+* Keeps Images and Bedtime Images as separate asset libraries.
+* Adds independent upload controls for both image libraries.
+* Adds pagination and item counts to both image pages.
+* Adds individual delete and delete-all controls to both image pages.
+* Stores normal Images in `/opt/mk-piclock/assets/images`.
+* Stores Bedtime Images in `/opt/mk-piclock/assets/bedtime-images`.
+* Removes obsolete face asset directories during installation.
+
+### UTF-8 and music metadata
+
+* Fixes UTF-8 song metadata handling.
+* Processes multibyte UTF-8 characters as complete characters instead of individual bytes.
+* Preserves supported accented ID3 title and artist characters instead of replacing them with `?`.
+* Correctly converts supported UTF-8 metadata to uppercase for the OLED.
+* Uses the same title and artist display path for alarm, GUI/API, and touch playback.
+
 ## v1.6.10 changes
 
-- Keeps the core network model SSID-free: it stores and renders only a cached connected/disconnected Wi-Fi state.
-- Keeps audio-thread completion synchronized with `pthread_cond_t`; no spin-wait or `usleep()` polling remains.
-- Makes latency-sensitive audio stops request-only so IPC and touch responses are immediate.
-- Uses `pthread_cond_timedwait()` only where completion is required, including track replacement and daemon shutdown.
-- Makes delete-all-music notification nonblocking while the decoder closes its already-open file handle.
+* Keeps the core network model SSID-free: it stores and renders only a cached connected/disconnected Wi-Fi state.
+* Keeps audio-thread completion synchronized with `pthread_cond_t`; no spin-wait or `usleep()` polling remains.
+* Makes latency-sensitive audio stops request-only so IPC and touch responses are immediate.
+* Uses `pthread_cond_timedwait()` only where completion is required, including track replacement and daemon shutdown.
+* Makes delete-all-music notification nonblocking while the decoder closes its already-open file handle.
 
 ## v1.6.8 changes
 
-- Adds TTP223B touch input on GPIO20, physical pin 38.
-- A short press stops the current song.
-- Holding for three seconds starts a random uploaded song.
-- Releasing after a long press does not stop the newly started song.
-- Song metadata now uses the same display path for alarm, GUI/API, and touch playback.
-- When metadata display is enabled, starting any song returns to the clock screen and shows `Title - Artist`.
-- Status now reports `touch_ok`, `touch_pressed`, and `touch_gpio`.
+* Adds TTP223B touch input on GPIO20, physical pin 38.
+* A short press stops the current song.
+* Holding for three seconds starts a random uploaded song.
+* Releasing after a long press does not stop the newly started song.
+* Song metadata now uses the same display path for alarm, GUI/API, and touch playback.
+* When metadata display is enabled, starting any song returns to the clock screen and shows `Title - Artist`.
+* Status now reports `touch_ok`, `touch_pressed`, and `touch_gpio`.
 
 ## v1.6.7 changes
 
-- Replaces generic GUI notices with action-specific feedback on every page.
-- Music actions now report the track being started, stopped, uploaded, or deleted.
-- Face, display, alarm, message, and log actions now report their exact outcome.
-- Adds the 16 MB GPU memory recommendation to `INSTALL.md`.
+* Replaces generic GUI notices with action-specific feedback on every page.
+* Music actions now report the track being started, stopped, uploaded, or deleted.
+* Image, display, alarm, message, and log actions now report their exact outcome.
+* Adds the 16 MB GPU memory recommendation to `INSTALL.md`.
 
 ## v1.6.6 changes
 
-- Reads ID3 title and artist fields from uploaded MP3 files.
-- Music listings return filenames plus title, artist, display text, and ID3 availability.
-- The OLED can show `Title - Artist` while a track plays.
-- Long song metadata scrolls continuously in the OLED footer, pausing at each end.
-- Song metadata display can be enabled or disabled from the Music module.
-- Screen messages can be sent now or after 10, 30, or 60 seconds.
-- The core holds one pending delayed message in memory. A newer delayed message replaces it.
+* Reads ID3 title and artist fields from uploaded MP3 files.
+* Music listings return filenames plus title, artist, display text, and ID3 availability.
+* The OLED can show `Title - Artist` while a track plays.
+* Long song metadata scrolls continuously in the OLED footer, pausing at each end.
+* Song metadata display can be enabled or disabled from the Music module.
+* Screen messages can be sent now or after 10, 30, or 60 seconds.
+* The core holds one pending delayed message in memory. A newer delayed message replaces it.
 
 ## Modular GUI
 
@@ -107,6 +155,8 @@ See `INSTALL.md` for complete Raspberry Pi setup and `ADDON_API.md` for every pu
 /opt/mk-piclock/api/openapi-v1.json
 /opt/mk-piclock/config
 /opt/mk-piclock/assets
+/opt/mk-piclock/assets/images
+/opt/mk-piclock/assets/bedtime-images
 /run/mk-piclock/core.sock
 ```
 

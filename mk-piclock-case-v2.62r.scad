@@ -1,4 +1,4 @@
-// mk-piclock case V2.3R
+// mk-piclock case V2.62R
 // Base geometry retained from mk-piclock-case-v2.51.scad
 // Lid geometry retained from mk-piclock-case-v2.52F-marked.scad
 //

@@ -1,44 +1,233 @@
-# mk-piclock v1.6.10: Build and Install
+# mk-piclock v1.6.37
 
-## Supported target
+mk-piclock is a native C alarm clock for Raspberry Pi. It drives a 256x64 SSD1322 OLED, MAX98357A I2S amplifier, speaker, and TTP223B touch sensor.
 
-Use Raspberry Pi OS Lite based on Debian 13 Trixie. The source uses the libgpiod 2.x C API.
+The project was created for my daughter Rylie. It is designed to behave like a simple bedside appliance, not a general-purpose computer.
 
-Recommended targets:
+## Features
 
-- Raspberry Pi Zero 2 W: Raspberry Pi OS Lite 32-bit or 64-bit, build with two jobs.
-- Raspberry Pi 5: Raspberry Pi OS Lite 64-bit, build with four jobs.
+### Clock and display
 
-Confirm the OS:
+- Large 12-hour or 24-hour clock
+- Full date under the time
+- Blinking colon
+- Day and bedtime image libraries
+- Automatic image rotation
+- Wi-Fi and alarm status indicators
+- Alarm volume indicator while an alarm is playing
+- OLED brightness control
+- Separate bedtime schedule and brightness
+- Yellow, green, or white panel selection for browser previews
+- Built-in and uploaded TrueType or OpenType fonts
+- Exact 256x64 live framebuffer preview on the Home page
 
-```bash
-cat /etc/os-release
+### Alarms
+
+- Seven independent alarm slots
+- Per-alarm time and weekday selection
+- Specific or random uploaded music
+- Separate starting and final volume
+- Volume ramp across the song
+- A short touch stops active audio
+
+### Kid-friendly touch control
+
+- Short press: stop the current alarm or song
+- Hold for three seconds: play a random song
+
+This gives the child a simple bedside music control without exposing technical settings.
+
+### Bedtime behaviour
+
+Bedtime mode uses its own schedule, image library, and brightness. It lets the clock remain useful at night without keeping the OLED unnecessarily bright.
+
+Day Images and Bedtime Images are stored separately. During bedtime, the clock uses bedtime artwork and the configured bedtime brightness.
+
+### Messages
+
+Parents can send a message to the OLED:
+
+- immediately
+- after 10, 30, or 60 seconds
+- at a browser-local date and time within the next 30 days
+
+A message can use:
+
+- text only
+- a specific Day Image
+- a specific Bedtime Image
+- a random Day Image
+- a random Bedtime Image
+- an image without text
+
+One future message can be pending. A new scheduled message replaces the existing one. Pending messages survive a core restart.
+
+The preview is rendered by `mk-piclock-core` using the same framebuffer, font measurements, word wrapping, image placement, centring, grayscale, and brightness rules as the physical OLED.
+
+### Images
+
+Day Images and Bedtime Images each support:
+
+- PNG upload
+- OLED conversion
+- paged library review
+- individual deletion
+- delete all
+- download all original PNG files as a ZIP
+
+The download ZIP excludes converted `.raw` files.
+
+### Music
+
+Uploaded MP3 files are decoded and re-encoded inside `mk-piclock-api`. No shell command or external encoder is launched.
+
+The recommended profile is:
+
+- mono
+- 96 kbps CBR
+- 44.1 kHz
+- 16 kHz low-pass
+
+The Music page includes:
+
+- upload and processing progress
+- play, stop, and delete controls
+- global volume
+- optional encoding settings
+- title, artist, album, year, track, genre, duration, bitrate, sample rate, channel, MPEG layer, and file size when available
+
+Long `Title - Artist` text scrolls across the OLED. Short text remains centred.
+
+#### Upload queue rule
+
+Only one MP3 may be uploaded at a time. A new upload is refused while another song is queued or processing.
+
+This prevents upload validation and transcoding from competing for CPU, memory, and storage on the Raspberry Pi.
+
+**Clear Queue** deletes waiting jobs and their temporary source files. It does not interrupt the file currently transcoding.
+
+## Web interface
+
+The GUI is organized by task.
+
+### Everyday
+
+- Home
+- Alarms
+- Messages
+- Music
+- Day Images
+- Bedtime Images
+
+### Settings
+
+- Display
+
+### Help
+
+- Recent Activity
+
+Technical details remain available in collapsed sections so normal controls stay simple.
+
+## Network access
+
+The web interface opens directly without a password.
+
+Any device that can reach TCP port 8080 can view and change the clock. Keep the clock on a trusted home network.
+
+Do not:
+
+- forward port 8080 through the router
+- expose the clock directly to the internet
+- place it on an untrusted guest or public network
+
+The API still runs as a restricted system account and communicates with the hardware process through a private Unix socket.
+
+## Architecture
+
+mk-piclock uses two native services.
+
+### `mk-piclock-core`
+
+Owns:
+
+- OLED and SPI
+- GPIO and touch input
+- ALSA audio playback
+- alarms
+- clock and message rendering
+- bedtime behaviour
+- persistent clock configuration
+- event logging
+
+### `mk-piclock-api`
+
+Owns:
+
+- local web GUI
+- HTTP API
+- upload validation
+- PNG conversion
+- MP3 transcoding
+- music and image libraries
+- OpenAPI document
+
+The services communicate through:
+
+```text
+/run/mk-piclock/core.sock
 ```
 
-The output should identify Debian 13 and Trixie.
+The private binary protocol is IPC version 11.
 
-## 1. Copy and extract the release
+## Time and NTP on Raspberry Pi OS Trixie
 
-Copy the ZIP to the Pi, then run:
+mk-piclock reads the Linux system clock. It does not contact an NTP server itself.
 
-```bash
-cd ~
-rm -rf mk-piclock-v1.6.10-network-status
-unzip mk-piclock-v1.6.10-network-status.zip
-cd mk-piclock-v1.6.10-network-status
-```
-
-When a checksum file is supplied:
+Raspberry Pi OS Lite based on Debian 13 Trixie normally uses `systemd-timesyncd` for network time synchronization. Set the timezone and confirm synchronization during installation:
 
 ```bash
-sha256sum -c mk-piclock-v1.6.10-network-status.zip.sha256
+sudo timedatectl set-timezone America/Edmonton
+sudo timedatectl set-ntp true
+
+timedatectl status
+timedatectl show -p NTPSynchronized
 ```
 
-## 2. Install build dependencies
+Expected results include:
+
+```text
+System clock synchronized: yes
+NTP service: active
+NTPSynchronized=yes
+```
+
+Without a battery-backed real-time clock, correct time after a power loss depends on the Pi restoring time and reaching a time source.
+
+## Supported platform
+
+Recommended operating system:
+
+```text
+Raspberry Pi OS Lite
+Debian 13 Trixie
+```
+
+Recommended hardware:
+
+- Raspberry Pi Zero 2 W
+- Raspberry Pi 5
+- SSD1322 256x64 OLED
+- MAX98357A I2S amplifier
+- 4-ohm, 3-watt speaker
+- TTP223B touch sensor
+
+See `pinouts.md` before applying power.
+
+## Build dependencies
 
 ```bash
 sudo apt update
-
 sudo apt install --no-install-recommends -y \
   build-essential \
   pkg-config \
@@ -48,565 +237,85 @@ sudo apt install --no-install-recommends -y \
   libfreetype-dev \
   libasound2-dev \
   libmpg123-dev \
+  libmp3lame-dev \
   libmicrohttpd-dev \
   alsa-utils \
   unzip \
   curl
 ```
 
-Confirm libgpiod is 2.x:
+`libmp3lame-dev` provides the in-process MP3 encoder.
 
-```bash
-pkg-config --modversion libgpiod
-```
+## Quick installation
 
-Confirm the HTTP development header exists:
-
-```bash
-test -f /usr/include/microhttpd.h && echo "libmicrohttpd header installed"
-```
-
-Optional dependency check:
-
-```bash
-pkg-config --modversion \
-  libgpiod \
-  libmicrohttpd \
-  freetype2 \
-  libpng \
-  libmpg123 \
-  alsa
-```
-
-## 3. Connect GPIO-header power
-
-Power the Raspberry Pi from a regulated 5 V supply through the 40-pin header:
-
-```text
-External +5 V -> Pi 5 V, physical pin 4
-External GND  -> Pi GND, physical pin 9
-```
-
-The amplifier uses separate physical connectors:
-
-```text
-MAX98357A VIN -> Pi 5 V, physical pin 2
-MAX98357A GND -> Pi GND, physical pin 14
-```
-
-Pins 2 and 4 are electrically connected to the same Raspberry Pi 5 V rail. All ground pins are common.
-
-Use a regulated supply sized for the Pi, OLED, amplifier, and speaker load. Do not connect USB power while the GPIO-header supply is connected.
-
-## 4. Configure boot firmware
-
-Edit:
-
-```bash
-sudo nano /boot/firmware/config.txt
-```
-
-Under the existing `[all]` section, ensure these entries exist once:
-
-```ini
-[all]
-
-dtparam=spi=on
-dtparam=audio=off
-dtoverlay=max98357a,no-sdmode
-
-# Headless appliance. Reserve the minimum GPU memory.
-gpu_mem=16
-```
-
-Do not add a second `[all]` section when one already exists.
-
-Save and reboot:
-
-```bash
-sudo reboot
-```
-
-## 5. Connect and verify hardware
-
-### Confirmed SSD1322 OLED wiring
-
-This wiring is confirmed working with the smaller 3.12-inch 256×64 SSD1322 OLED used by mk-piclock:
-
-| OLED pin | Signal | Raspberry Pi |
-| ---: | --- | --- |
-| 1 | VSS | GND, physical pin 6 |
-| 2 | VCC_IN | 3.3 V, physical pin 1 |
-| 4 | D0 / CLK | GPIO11 / SPI0 SCLK, physical pin 23 |
-| 5 | D1 / DIN | GPIO10 / SPI0 MOSI, physical pin 19 |
-| 14 | D/C# | GPIO25, physical pin 22 |
-| 15 | RES# | GPIO27, physical pin 13 |
-| 16 | CS# | GPIO8 / SPI0 CE0, physical pin 24 |
-
-Treat this table as the authoritative OLED wiring.
-
-Do not substitute the discarded GPIO27/GPIO24 test mapping.
-
-The core expects:
-
-```text
-SPI device: /dev/spidev0.0
-OLED CS:    GPIO8 / SPI0 CE0, physical pin 24
-OLED DC:    GPIO25, physical pin 22
-OLED RST:   GPIO27, physical pin 13
-```
-
-The OLED does not use SPI MISO. Connect only the OLED pins listed above.
-
-### TTP223B wiring
-
-Connect the touch module at 3.3 V:
-
-```text
-TTP223B VCC -> Pi 3.3 V, physical pin 17
-TTP223B GND -> Pi GND, physical pin 39
-TTP223B OUT -> Pi GPIO20, physical pin 38
-```
-
-The core treats the TTP223B output as active-high and applies software debounce.
-
-Do not power the module from 5 V while its output is connected directly to a Raspberry Pi GPIO.
-
-Touch actions:
-
-```text
-Short press:   stop the current song
-Hold 3 seconds: play a random uploaded song
-```
-
-### MAX98357A wiring
-
-```text
-MAX98357A VIN            -> Pi 5 V, physical pin 2
-MAX98357A GND            -> Pi GND, physical pin 14
-MAX98357A BCLK           -> Pi GPIO18, physical pin 12
-MAX98357A LRC/LRCLK/WS   -> Pi GPIO19, physical pin 35
-MAX98357A DIN            -> Pi GPIO21, physical pin 40
-MAX98357A SD/EN          -> Not connected
-```
-
-Connect the speaker only to the amplifier:
-
-```text
-MAX98357A SPK+ -> Speaker +
-MAX98357A SPK- -> Speaker -
-```
-
-Do not connect either speaker terminal to Raspberry Pi ground.
-
-### Verify interfaces
-
-After reconnecting:
-
-```bash
-ls -l /dev/spidev0.0
-ls -l /dev/gpiochip0
-gpiodetect
-aplay -l
-```
-
-Expected hardware interfaces:
-
-```text
-SPI:       /dev/spidev0.0
-GPIO chip: /dev/gpiochip0
-OLED DC:   GPIO25
-OLED RST:  GPIO27
-Touch OUT: GPIO20, physical pin 38
-Audio:     ALSA device "default"
-```
-
-Do not continue until `/dev/spidev0.0` and `/dev/gpiochip0` exist and ALSA lists the I2S audio device.
-
-## 6. Build
-
-Raspberry Pi Zero 2 W:
+After configuring SPI and the MAX98357A overlay as described in `INSTALL.md`:
 
 ```bash
 make clean
 make -j2
-```
-
-Raspberry Pi 5:
-
-```bash
-make clean
-make -j4
-```
-
-Confirm both programs exist:
-
-```bash
-ls -lh mk-piclock-core mk-piclock-api
-```
-
-Expected binaries:
-
-```text
-mk-piclock-core
-mk-piclock-api
-```
-
-## 7. Install
-
-Run:
-
-```bash
 make install
+sudo systemctl restart mk-piclock-core.service mk-piclock-api.service
 ```
 
-Do not prefix the full command with `sudo`. The Makefile invokes `sudo` only for privileged installation steps.
-
-The install target:
-
-- Creates the `mk-piclock` group.
-- Creates separate `mk-piclock-core` and `mk-piclock-api` users.
-- Installs both binaries under `/opt/mk-piclock`.
-- Installs the modular GUI and OpenAPI document.
-- Preserves existing assets and clock configuration.
-- Installs and enables both systemd services.
-- Removes the old single-service installation when present.
-
-An ignored error from this command is harmless when the old service does not exist:
-
-```text
-systemctl disable --now mk-piclock.service
-```
-
-## 8. Start and verify services
-
-```bash
-sudo systemctl restart \
-  mk-piclock-core.service \
-  mk-piclock-api.service
-```
-
-Check status:
-
-```bash
-sudo systemctl --no-pager --full status \
-  mk-piclock-core.service \
-  mk-piclock-api.service
-```
-
-Confirm both start at boot:
-
-```bash
-systemctl is-enabled \
-  mk-piclock-core.service \
-  mk-piclock-api.service
-```
-
-Expected:
-
-```text
-enabled
-enabled
-```
-
-Test the API locally:
-
-```bash
-curl -s http://127.0.0.1:8080/api/v1/status
-```
-
-Open the GUI:
+Open:
 
 ```text
 http://<clock-ip>:8080/
 ```
 
-Port `8080` is required unless `MK_PICLOCK_API_PORT` is changed.
+Do not run `sudo make install`. The Makefile invokes `sudo` only for privileged installation steps.
 
-## 9. Verify v1.6.10 features
-
-### Verify touch input
-
-Read touch status:
-
-```bash
-curl -s http://127.0.0.1:8080/api/v1/status \
-  | grep -o '"touch_[^"]*"[^,}]*'
-```
-
-Expected while idle:
+## Storage
 
 ```text
-"touch_ok":1
-"touch_pressed":0
-"touch_gpio":20
-```
-
-Touch and hold the sensor while repeating the status request. `touch_pressed` should become `1`.
-
-Functional test:
-
-1. Start a song from the Music page.
-2. Tap the sensor and confirm the song stops.
-3. Hold the sensor for three seconds and confirm a random uploaded song starts.
-4. Confirm `Title - Artist` appears on the clock when song metadata display is enabled.
-
-Open each GUI page and perform a safe action. The notice bar should describe the exact result, such as:
-
-```text
-Playing <title>
-Screen cleared
-Alarm 1 saved
-Message scheduled in 10 seconds
-```
-
-List music and ID3 metadata:
-
-```bash
-curl -s http://127.0.0.1:8080/api/v1/assets/music
-```
-
-The response includes the legacy `files` array and a `tracks` array containing:
-
-```text
-file
-title
-artist
-display
-id3
-```
-
-Schedule a message for 10 seconds later:
-
-```bash
-curl -s \
-  --data-urlencode 'message_text=Time for school' \
-  --data 'delay_seconds=10' \
-  http://127.0.0.1:8080/api/v1/display/message
-```
-
-Enable OLED song metadata:
-
-```bash
-curl -s \
-  --data 'show_song_metadata=1' \
-  http://127.0.0.1:8080/api/v1/config/audio
-```
-
-Disable it:
-
-```bash
-curl -s \
-  --data 'show_song_metadata=0' \
-  http://127.0.0.1:8080/api/v1/config/audio
-```
-
-## Upgrade from an earlier release
-
-Build and install normally:
-
-```bash
-cd ~/mk-piclock-v1.6.10-network-status
-make clean
-make -j2
-make install
-sudo systemctl restart mk-piclock-core mk-piclock-api
-```
-
-Existing faces, music, fonts, alarms, clock name, display settings, and volume are retained.
-
-The `show_song_metadata` setting defaults to enabled until saved otherwise.
-
-Upgrade the API and core together so their product versions remain aligned. Releases v1.6.5 and earlier must upgrade both programs because v1.6.6 introduced binary IPC protocol version 4.
-
-## Module enable and disable
-
-Edit:
-
-```bash
-sudo nano /opt/mk-piclock/web/modules/modules.json
-```
-
-Set a module to:
-
-```json
-{"enabled": false}
-```
-
-Refresh the browser. Disabled modules are removed from the menu and their HTML, CSS, and JavaScript are not loaded.
-
-## Configuration locations
-
-```text
+/opt/mk-piclock/assets/images
+/opt/mk-piclock/assets/bedtime-images
+/opt/mk-piclock/assets/music
+/opt/mk-piclock/assets/music/.processing
+/opt/mk-piclock/assets/fonts
 /opt/mk-piclock/config/clock.conf
 /opt/mk-piclock/config/event.log
-/opt/mk-piclock/assets/faces
-/opt/mk-piclock/assets/bedtime-faces
-/opt/mk-piclock/assets/music
-/opt/mk-piclock/assets/fonts
 ```
 
-## Logs
-
-Core logs:
+## Service logs
 
 ```bash
-sudo journalctl \
-  -b \
-  -u mk-piclock-core.service \
-  -n 100 \
-  --no-pager
-```
-
-API logs:
-
-```bash
-sudo journalctl \
-  -b \
-  -u mk-piclock-api.service \
-  -n 100 \
-  --no-pager
+sudo journalctl -b -u mk-piclock-core.service -n 100 --no-pager
+sudo journalctl -b -u mk-piclock-api.service -n 100 --no-pager
 ```
 
 Follow both services:
 
 ```bash
-sudo journalctl \
-  -f \
+sudo journalctl -f \
   -u mk-piclock-core.service \
   -u mk-piclock-api.service
 ```
 
-## Common build and hardware problems
+## Known limitations
 
-### `microhttpd.h: No such file or directory`
+- The MAX98357A and speaker may make a small pop when audio starts or stops.
+- **Clear Queue** removes waiting MP3 jobs but does not cancel the active transcode.
+- The clock has no built-in battery-backed real-time clock. Accurate time after startup depends on Linux time restoration or NTP.
+- The GUI has no password. Network isolation is the access control.
+- USB-C power behaviour depends on the power board used in the enclosure. A USB-A to USB-C cable is often the safest choice for simple 5 V boards that do not implement USB-C power negotiation correctly.
+- The physical OLED colour is fixed by the panel. The GUI colour choice changes browser previews only.
 
-Install the development package:
-
-```bash
-sudo apt update
-sudo apt install -y libmicrohttpd-dev
-make clean
-make -j2
-```
-
-### libmicrohttpd status-name warnings
-
-v1.6.10 uses:
+## Versions
 
 ```text
-MHD_HTTP_URI_TOO_LONG
-MHD_HTTP_CONTENT_TOO_LARGE
+Product:     1.6.37
+HTTP API:    1.16
+Private IPC: 11
 ```
 
-Run a clean build so older objects are not reused:
+Install the core and API from the same release, then restart both services and hard-refresh the browser.
 
-```bash
-make clean
-make -j2
-```
+## Documentation
 
-### `gpiod_*` declarations are missing
-
-Check the installed major version:
-
-```bash
-pkg-config --modversion libgpiod
-```
-
-It must be 2.x.
-
-### `/dev/spidev0.0` is missing
-
-Confirm SPI is enabled:
-
-```bash
-grep -n '^[[:space:]]*dtparam=spi=on' \
-  /boot/firmware/config.txt
-```
-
-Then reboot:
-
-```bash
-sudo reboot
-```
-
-### `/dev/gpiochip0` is missing
-
-```bash
-gpiodetect
-ls -l /dev/gpiochip*
-```
-
-The current source expects `/dev/gpiochip0`.
-
-### OLED remains blank
-
-Confirm the authoritative wiring:
-
-```text
-OLED pin 1  VSS     -> Pi GND, physical pin 6
-OLED pin 2  VCC_IN  -> Pi 3.3 V, physical pin 1
-OLED pin 4  D0/CLK  -> Pi GPIO11, physical pin 23
-OLED pin 5  D1/DIN  -> Pi GPIO10, physical pin 19
-OLED pin 14 D/C#    -> Pi GPIO25, physical pin 22
-OLED pin 15 RES#    -> Pi GPIO27, physical pin 13
-OLED pin 16 CS#     -> Pi GPIO8 / CE0, physical pin 24
-```
-
-Confirm the service has access to SPI and GPIO:
-
-```bash
-ls -l /dev/spidev0.0 /dev/gpiochip0
-id mk-piclock-core
-```
-
-Check the core log:
-
-```bash
-sudo journalctl \
-  -b \
-  -u mk-piclock-core.service \
-  -n 100 \
-  --no-pager
-```
-
-### API is offline
-
-```bash
-sudo systemctl restart mk-piclock-core mk-piclock-api
-
-sudo journalctl \
-  -b \
-  -u mk-piclock-api.service \
-  -n 100 \
-  --no-pager
-```
-
-### No audio
-
-```bash
-aplay -l
-speaker-test -D default -c 2 -t sine
-```
-
-Stop the test with `Ctrl+C`.
-
-Confirm the boot settings:
-
-```bash
-grep -nE \
-  '^[[:space:]]*(dtparam=audio=off|dtoverlay=max98357a,no-sdmode)' \
-  /boot/firmware/config.txt
-```
-
-### Incorrect GPU memory reservation
-
-Confirm the headless setting exists once:
-
-```bash
-grep -n '^[[:space:]]*gpu_mem=16' \
-  /boot/firmware/config.txt
-```
-
-A reboot is required after changing firmware configuration.
+- Build and install: `INSTALL.md`
+- Hardware wiring: `pinouts.md`
+- Version history: `CHANGELOG.md`
+- HTTP API: `ADDON_API.md`
+- OpenAPI schema: `api/openapi-v1.json`
+- Current release summary: `RELEASE_NOTES.md`

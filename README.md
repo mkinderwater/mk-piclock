@@ -1,199 +1,346 @@
-# mk-piclock v1.6.26
+# mk-piclock v1.7.1
 
-mk-piclock is a native C alarm clock for Raspberry Pi, a 256x64 SSD1322 OLED, MAX98357A I2S audio, and a TTP223B touch sensor.
+v1.7.1 keeps the touch-sensor LED feedback and batch MP3 upload feature, and replaces the MP3 queue internals with the cleaner atomic batch queue. Pressing the TTP223B sensor blinks the RGB LED using a selectable global colour, and the Music page can upload several MP3 files at once while blocking new uploads until the whole batch is processed.
 
-It supports alarms, music, day and bedtime images, scheduled screen messages, automatic bedtime dimming, a live OLED preview, and a password-protected web GUI.
+The project was created for my daughter Rylie. It is designed to behave like a simple bedside appliance, not a general-purpose computer.
 
-This project was created for my daughter Rylie. The goal is a dependable bedside appliance that a child can understand, not a small computer that needs constant attention.
+## What's new in v1.7.1
+
+- Touching the TTP223B sensor triggers a short RGB LED blink.
+- The touch blink defaults to white and can be changed from Lighting, Global Controls.
+- Touch blink brightness can be adjusted separately from the normal activity profiles.
+- The Music upload form accepts several MP3 files in one request.
+- The full MP3 selection is validated and staged before any job is queued.
+- A staging or queue failure rolls back the whole batch instead of leaving a partial upload.
+- New MP3 uploads are refused while any file from the current batch is queued or processing.
+- The Music page shows selected-song count and total upload size before upload.
+- Music and Stories share the same browser-side MP3 metadata display helper, reducing duplicate UI code.
+- Installer and runtime directory creation was audited; no obsolete or unused storage directories are created.
+
 
 ## Features
 
-### Kid-first bedside behaviour
-
-* A large clock, blinking colon, full date, status icons, and a rotating 54x54 image fit on the 256x64 OLED.
-* Day Images provide changing expressions and activities during normal hours.
-* Bedtime Images replace the day library during the bedtime schedule.
-* Bedtime brightness can be reduced from 100 percent down to fully off.
-* A short touch stops an active alarm or music.
-* Holding the touch sensor for three seconds plays a random uploaded song, giving the child a simple personal music button.
-* Parents can send a picture, a short message, or both to the clock immediately or later.
-
-The bedtime system is meant to keep the clock useful without making it something a child stays awake watching. During sleeping hours, the display can be dimmed and the normal image rotation is replaced with calmer bedtime artwork.
-
 ### Clock and display
 
-* 12-hour or 24-hour time.
-* Full date below the clock when music information is not being shown.
-* Blinking colon.
-* Wi-Fi connection indicator based on the Raspberry Pi `wlan0` interface.
-* Alarm-enabled indicator.
-* Active alarm volume shown on the OLED.
-* Configurable clock name with a startup greeting such as `Hi Rylie Bear`.
-* Built-in clock fonts plus uploaded TTF and OTF fonts.
-* Adjustable uploaded-font size.
-* Yellow, Green, or White OLED selection so browser previews match the physical panel.
-* Exact 256x64 live preview of the framebuffer sent to the OLED.
-* Screen-off and return-to-clock controls.
-
-The OLED colour setting changes the browser preview only. Software cannot change the colour of the physical OLED panel.
+- Large 12-hour or 24-hour clock
+- Full date under the time
+- Blinking colon
+- Day and bedtime image libraries
+- Automatic image rotation
+- Wi-Fi and alarm status indicators
+- Alarm volume indicator while an alarm is playing
+- OLED brightness control
+- Separate bedtime schedule and brightness
+- Yellow, green, or white panel selection for browser previews
+- Built-in and uploaded TrueType or OpenType fonts
+- Exact 256x64 live framebuffer preview on the Home page
 
 ### Alarms
 
-* Seven alarm slots.
-* Independent on/off state, time, and weekday selection for each alarm.
-* A selected song or a random uploaded song.
-* Independent starting and final volume for each alarm.
-* Volume ramping over the duration of the song.
-* A touch press can stop an active alarm.
-* Alarms remain stored across restarts.
+- Seven independent alarm slots
+- Per-alarm time and weekday selection
+- Specific or random uploaded music
+- Separate starting and final volume
+- Volume ramp across the song
+- Next alarm shown on Home and System
+- Last successful alarm recorded on System
 
-### Music
+#### Alarm safety
 
-* Multiple MP3 files can be uploaded at once.
-* Music is decoded and re-encoded inside `mk-piclock-api` without launching shell commands or external encoders.
-* Recommended output profile:
+When an alarm starts:
 
-  * mono
-  * 96 kbps CBR
-  * 44.1 kHz
-  * 16 kHz low-pass
-* Optional 64, 96, 128, or 160 kbps output.
-* Optional 32 kHz or 44.1 kHz sample rate.
-* Optional 12, 16, or 18 kHz low-pass.
-* Upload progress and processing status.
-* Play, Stop, Delete, and Delete All controls.
-* Global normal volume from 0 to 100 percent.
-* Optional `Title - Artist` display on the clock.
-* Long song names scroll continuously across the bottom of the OLED.
-* Common accented Latin metadata is handled without byte-by-byte replacement.
+- the selected song repeats until the touch sensor is pressed
+- browser stop controls cannot dismiss the alarm
+- an unreadable or missing song falls back to the protected built-in alarm
+- the alarm stops after 30 minutes if nobody presses the sensor
 
-The recommended profile is intended for a MAX98357A and a small 4-ohm, 3-watt mono speaker.
+The fallback alarm is installed at:
+
+```text
+/opt/mk-piclock/assets/default-alarm.mp3
+```
+
+It is retained during factory reset and is not part of the user music library.
+
+### Kid-friendly touch control
+
+- Press while an alarm is active: dismiss the alarm
+- Short press while music is playing: stop the song
+- Hold for three seconds: play a random song
+- Ten short taps within eight seconds: play a random story when Story Mode is enabled
+- Any touch press: blink the RGB LED using the selected touch-feedback colour
+
+Alarms cannot be dismissed from the browser. The physical touch sensor must be pressed.
+
+This gives the child a simple bedside music control without exposing technical settings.
+
+### Bedtime behaviour
+
+Bedtime mode uses its own schedule, image library, and brightness. It lets the clock remain useful at night without keeping the OLED unnecessarily bright.
+
+Day Images and Bedtime Images are stored separately. During bedtime, the clock uses bedtime artwork and the configured bedtime brightness. Parents can disable touch-started music during bedtime while leaving alarms enabled.
 
 ### Messages
 
-Messages can contain:
+Parents can send a message to the OLED:
 
-* a specific Day Image
-* a specific Bedtime Image
-* a random Day Image
-* a random Bedtime Image
-* text only
-* an image only
-* an image and text
+- immediately
+- after 10, 30, or 60 seconds
+- at a browser-local date and time within the next 30 days
 
-Delivery options:
+A message can use:
 
-* immediately
-* after 10 seconds
-* after 30 seconds
-* after 60 seconds
-* at a browser-local date and time within the next 30 days
+- text only
+- a specific Day Image
+- a specific Bedtime Image
+- a random Day Image
+- a random Bedtime Image
+- an image without text
 
-Messages remain on the OLED for 30 seconds, then the normal clock returns. One future message can be pending. Scheduling another message replaces the previous pending message. Pending messages survive a core restart.
+One future message can be pending. A new scheduled message replaces the existing one. Pending messages survive a core restart.
 
-Message text is limited to 180 characters and up to three rendered lines. The preview is generated by `mk-piclock-core` using the same FreeType measurements, wrapping, image placement, centring, grayscale, and brightness rules as the real OLED. The browser does not estimate the layout.
-
-Messages are the intentional way to place a selected image on the OLED. The Day Images and Bedtime Images pages are used to manage their libraries.
+The preview is rendered by `mk-piclock-core` using the same framebuffer, font measurements, word wrapping, image placement, centring, grayscale, and brightness rules as the physical OLED.
 
 ### Images
 
-Day Images and Bedtime Images are separate libraries.
+Day Images and Bedtime Images each support:
 
-Each page supports:
+- PNG upload
+- OLED conversion
+- paged library review
+- individual deletion
+- delete all
+- download all original PNG files as a ZIP
 
-* multiple PNG uploads
-* image previews
-* pagination
-* individual deletion
-* delete all
-* optional file details
+The download ZIP excludes converted `.raw` files.
 
-Uploaded PNG files are converted to the packed 4-bit grayscale raw format used by the SSD1322. The original PNG is retained for the GUI preview.
+### Music
 
-Normal images change at a random interval of up to five minutes. During the bedtime window, bedtime images change every five minutes.
+Uploaded MP3 files are decoded and re-encoded inside `mk-piclock-api`. No shell command or external encoder is launched.
 
-Storage locations:
+The recommended profile is:
 
-```text
-/opt/mk-piclock/assets/images
-/opt/mk-piclock/assets/bedtime-images
-```
+- mono
+- 96 kbps CBR
+- 44.1 kHz
+- 16 kHz low-pass
 
-Each manually copied image must include matching files with the same base name:
+The Music page includes:
 
-```text
-example.png
-example.raw
-```
+- multiple-file upload
+- selected-file count and total upload size before upload
+- upload and processing progress for queued and active jobs
+- play, stop, and delete controls
+- global volume
+- optional encoding settings
+- title, artist, album, year, track, genre, duration, bitrate, sample rate, channel, MPEG layer, and file size when available
 
-A PNG without its converted `.raw` partner does not appear in the image library or OLED rotation.
+Long `Title - Artist` text scrolls across the OLED. Short text remains centred.
 
-## Web GUI
+#### Upload queue rule
 
-The GUI is designed around common tasks rather than technical components.
+A batch of MP3 files may be uploaded at one time. A new upload is refused while any song from the current batch is queued or processing.
+
+The full selection is validated and staged before any job is queued. If staging or queueing fails, the staged files are rolled back instead of leaving a partial batch. This keeps upload validation and transcoding from competing for CPU, memory, and storage on the Raspberry Pi.
+
+**Clear Queue** deletes waiting jobs and their temporary source files. It does not interrupt the file currently transcoding.
+
+### Stories
+
+Story Mode uses a separate MP3 library stored under `assets/stories`. It can be enabled or disabled by a parent from the Stories page and has its own volume control.
+
+When the touch sensor is tapped ten times within eight seconds:
+
+1. a random story is selected
+2. the OLED clears and shows up to five random Bedtime Images
+3. the configurable intro message appears, defaulting to `STORY MODE!`
+4. after three seconds, the selected story title appears in the normal clock footer
+5. after four more seconds, the standard date returns while the story keeps playing
+
+A single touch stops the story. Stories are not used by alarms and are not included in backups.
+
+### RGB activity lighting
+
+A common-cathode RGB LED can use a separate profile for each activity:
+
+- Alarm
+- Bedtime
+- Message
+- Music
+- Daytime
+- Stories
+
+Each profile supports a solid colour, a fade between two colours, or rainbow mode. Brightness and the full effect-cycle time are configurable. The Lighting page can preview unsaved settings for ten seconds and includes red, green, blue, and white wiring tests.
+
+Touch feedback is handled as a high-priority temporary LED scene while the touch sensor is pressed. Its colour and brightness live under Lighting, Global Controls, so it can stay consistent no matter which activity profile is currently active. The default touch feedback is a white blink.
+
+Global controls provide a master switch, maximum brightness, per-channel calibration, optional idle-off behaviour, a gradual fade before bedtime, and touch-blink settings. Profile previews and wiring tests may temporarily bypass the master switch. A touch press briefly takes priority while pressed, then the normal alarm, message, story, music, bedtime, or daytime scene resumes.
+
+The driver uses 200 Hz batched trailing-edge software PWM with 32 stable duty levels. A modest real-time priority is applied only to the LED timing thread, and missed low-brightness pulses are skipped rather than emitted late. Scene changes crossfade over 350 ms except alarms, which apply immediately. Repeated GPIO write failures disable lighting and appear in status and diagnostics.
+
+The runtime priority after touch feedback is Alarm, Message, Stories, Music, Bedtime, then Daytime.
+
+## Web interface
+
+The GUI is organized by task.
 
 ### Everyday
 
-* Home
-* Alarms
-* Messages
-* Music
-* Day Images
-* Bedtime Images
+- Home
+- Alarms
+- Messages
+- Music
+- Lighting
+- Stories
+- Day Images
+- Bedtime Images
 
 ### Settings
 
-* Display
-* Password & Access
+- Display
+- System
+
+The System page provides live diagnostics without launching external commands.
+
+#### Network
+
+- IP address
+- hostname
+- SSID
+- active interface
+- Wi-Fi signal percentage and dBm
+
+#### Time
+
+- system-time validity
+- NTP synchronization state
+- a prominent Home-page warning when time is not synchronized
+
+#### Device identity
+
+- short Inventory ID derived from the Raspberry Pi board serial
+- full Raspberry Pi board serial
+- Raspberry Pi board revision
+- OS machine ID
+- CPU signature for processor identification
+
+Use the Inventory ID or Raspberry Pi serial to track a physical clock. The OS machine ID can change after reimaging, and the CPU signature is not unique.
+
+#### Release and Raspberry Pi platform
+
+- installed release version
+- HTTP API version
+- API compile date and time
+- Raspberry Pi model
+- operating system name
+- OS version and codename
+- kernel version
+- CPU architecture
+- system uptime
+- CPU temperature
+
+#### Storage and SD card
+
+- used, available, and total system storage
+- Day Images directory size and file count
+- Bedtime Images directory size and file count
+- music directory size and file count
+- stories directory size and file count
+- fonts directory size and file count
+- system drive
+- root partition and filesystem
+- root read/write state
+- boot partition, filesystem, and mount point
+- SD-card device and type
+- product name
+- capacity
+- manufacturer ID
+- OEM ID
+- serial number
+- manufacture date
+- CID
+
+#### Service and clock health
+
+- API health
+- core connection
+- OLED state
+- touch-sensor state
+- next alarm
+- last successful alarm
+
+**Download Diagnostic Report** saves the same information as a text file for support or troubleshooting.
+
+### Backup and reset
+
+The System page can:
+
+- download a backup ZIP
+- restore a backup created by mk-piclock
+- factory reset settings and user-added assets
+
+Backups include:
+
+- alarms
+- display and bedtime settings
+- clock name and personalization
+- scheduled-message data
+- Day Images
+- Bedtime Images
+- uploaded fonts
+
+Restore accepts only a validated mk-piclock backup ZIP. Paths, metadata, stored entries, sizes, and CRC values are checked before files are activated. Existing settings, images, and fonts are staged first and restored if the operation fails. Uploaded music and stories are not included in backups. Restore has no music or story handling, and both current libraries remain unchanged.
+
+Restore is blocked while an alarm is active. Factory reset is blocked while an alarm is active or music is processing. Factory reset still removes uploaded music and stories. The protected fallback alarm remains installed after a factory reset.
 
 ### Help
 
-* Recent Activity
+- Recent Activity
 
-Home shows the live OLED framebuffer, current sound state, bedtime schedule, quick controls, software version, uptime, touch status, and display details.
+Technical details remain available in collapsed sections so normal controls stay simple.
 
-Technical options such as audio processing, font management, filenames, and activity logs remain available without crowding the normal controls.
+## Network access
 
-## Touch controls
+The web interface opens directly without a password.
 
-The TTP223B is read as an active-high input on BCM GPIO20.
+Any device that can reach TCP port 8080 can view and change the clock. Keep the clock on a trusted home network.
 
-```text
-Short press:      stop active music or alarm
-Hold 3 seconds:   play a random uploaded song
-```
+Do not:
 
-A short press while no audio is playing has no assigned action in v1.6.26.
+- forward port 8080 through the router
+- expose the clock directly to the internet
+- place it on an untrusted guest or public network
+
+The API still runs as a restricted system account and communicates with the hardware process through a private Unix socket.
 
 ## Architecture
 
-mk-piclock uses two restricted processes:
+mk-piclock uses two native services.
 
 ### `mk-piclock-core`
 
 Owns:
 
-* SSD1322 OLED
-* GPIO
-* touch input
-* ALSA audio playback
-* alarms
-* message timing
-* framebuffer rendering
-* persistent clock configuration
-* activity logging
+- OLED and SPI
+- GPIO and touch input
+- ALSA audio playback
+- alarms
+- clock and message rendering
+- bedtime behaviour
+- persistent clock configuration
+- event logging
 
 ### `mk-piclock-api`
 
 Owns:
 
-* web GUI
-* HTTP API
-* authentication
-* upload validation
-* PNG conversion
-* MP3 processing
-* image, music, and font libraries
+- local web GUI
+- HTTP API
+- upload validation
+- PNG conversion
+- MP3 transcoding
+- music, story, and image libraries
+- OpenAPI document
 
 The services communicate through:
 
@@ -201,76 +348,66 @@ The services communicate through:
 /run/mk-piclock/core.sock
 ```
 
-The socket uses private binary IPC version 11. The API does not run as root and does not execute shell commands.
+The private binary protocol is IPC version 15.
 
-Both systemd services use restricted service accounts and hardening options including `NoNewPrivileges`, protected system paths, limited address families, and empty capability sets.
+## Command-free runtime
 
-## GUI security
+The running core and API do not use:
 
-* Initial password: `password`
-* Change the password under **Password & Access** after the first login.
-* New passwords must contain at least eight characters.
-* **Remember this device** keeps a trusted browser signed in for 90 days.
-* Remembered access survives API and Raspberry Pi restarts.
-* Signing out also forgets the current browser.
-* **Forget All Remembered Devices** invalidates all trusted browsers without ending the current signed-in session.
-* Changing the password invalidates other sessions and remembered devices.
-* Passwords use salted PBKDF2-HMAC-SHA256 hashes.
-* Remembered-device tokens are signed with a random secret stored in the protected password record.
-* Authentication cookies are HttpOnly and SameSite Strict.
-* Repeated failed logins trigger a temporary lockout.
-* Cross-origin browser access is restricted to the configured GUI origin.
+- `exec*()`
+- `system()`
+- `popen()`
+- `posix_spawn()`
+- `fork()` or `vfork()`
 
-The built-in server uses HTTP. Use it only on a trusted LAN, or place it behind a VPN or HTTPS reverse proxy.
+MP3 decoding, MP3 encoding, ZIP backup and restore, network inspection, platform reporting, and storage inspection run in-process through libraries and direct Linux interfaces.
 
-## Hardware
+The Makefile and installation steps use normal shell tools. This restriction applies to the installed runtime services.
 
-Recommended Raspberry Pi targets:
+## Time and NTP on Raspberry Pi OS Trixie
 
-* Raspberry Pi Zero 2 W
-* Raspberry Pi 5
+mk-piclock reads the Linux system clock. It does not contact an NTP server itself.
 
-Main hardware:
+Raspberry Pi OS Lite based on Debian 13 Trixie normally uses `systemd-timesyncd` for network time synchronization. Set the timezone and confirm synchronization during installation:
 
-* Raspberry Pi with a 40-pin GPIO header
-* SSD1322 256x64 4-wire SPI OLED
-* MAX98357A I2S mono amplifier
-* 4 to 8-ohm speaker
-* TTP223B touch sensor
-* regulated 5 V supply suitable for the Pi and amplifier
+```bash
+sudo timedatectl set-timezone America/Edmonton
+sudo timedatectl set-ntp true
 
-Important GPIO assignments:
-
-| Function       | BCM GPIO | Physical pin |
-| -------------- | -------: | -----------: |
-| OLED MOSI      |       10 |           19 |
-| OLED clock     |       11 |           23 |
-| OLED CS / CE0  |        8 |           24 |
-| OLED DC        |       25 |           22 |
-| OLED reset     |       27 |           13 |
-| MAX98357A BCLK |       18 |           12 |
-| MAX98357A LRC  |       19 |           35 |
-| MAX98357A DIN  |       21 |           40 |
-| TTP223B OUT    |       20 |           38 |
-
-See [`pinouts.md`](pinouts.md) before applying power.
-
-The documented build powers the Pi through physical pin 4 and ground through physical pin 9. Do not connect USB power while the header supply is connected.
-
-## Supported software
-
-Use Raspberry Pi OS Lite based on Debian 13 Trixie. The source uses the libgpiod 2.x API.
-
-Required boot settings in `/boot/firmware/config.txt`:
-
-```ini
-dtparam=spi=on
-dtparam=audio=off
-dtoverlay=max98357a,no-sdmode
-gpu_mem=16
+timedatectl status
+timedatectl show -p NTPSynchronized
 ```
 
-The `no-sdmode` overlay is used because the tested MAX98357A SD / EN pad remains unconnected.
+Expected results include:
+
+```text
+System clock synchronized: yes
+NTP service: active
+NTPSynchronized=yes
+```
+
+Without a battery-backed real-time clock, correct time after a power loss depends on the Pi restoring time and reaching a time source.
+
+## Supported platform
+
+Recommended operating system:
+
+```text
+Raspberry Pi OS Lite
+Debian 13 Trixie
+```
+
+Recommended hardware:
+
+- Raspberry Pi Zero 2 W
+- Raspberry Pi 5
+- SSD1322 256x64 OLED
+- MAX98357A I2S amplifier
+- 4-ohm, 3-watt speaker
+- TTP223B touch sensor
+- common-cathode RGB LED with one resistor per colour channel
+
+See `pinouts.md` before applying power.
 
 ## Build dependencies
 
@@ -292,23 +429,18 @@ sudo apt install --no-install-recommends -y \
   curl
 ```
 
-`libmp3lame-dev` provides the in-process MP3 encoder. Password hashing and remembered-device signing are implemented internally and do not add a crypto-library dependency.
+`libmp3lame-dev` provides the in-process MP3 encoder.
 
-## Quick install
+## Quick installation
+
+After configuring SPI and the MAX98357A overlay as described in `INSTALL.md`:
 
 ```bash
-cd ~
-unzip mk-piclock-v1.6.26-network-status.zip
-cd mk-piclock-v1.6.26-network-status
 make clean
 make -j2
 make install
 sudo systemctl restart mk-piclock-core.service mk-piclock-api.service
 ```
-
-Use `make -j4` on a Raspberry Pi 5.
-
-Do not run `sudo make install`. The Makefile invokes `sudo` only for the steps that need it.
 
 Open:
 
@@ -316,74 +448,26 @@ Open:
 http://<clock-ip>:8080/
 ```
 
-Then:
-
-1. Sign in with `password`.
-2. Change the password.
-3. Set the clock name.
-4. Select the physical OLED colour for accurate previews.
-5. Configure bedtime hours and brightness.
-6. Upload Day Images and Bedtime Images.
-7. Upload music.
-8. Configure alarms.
-
-See [`INSTALL.md`](INSTALL.md) for the full procedure.
+Do not run `sudo make install`. The Makefile invokes `sudo` only for privileged installation steps.
 
 ## Storage
+
+The installer and services only create the storage and runtime directories used by the clock. No old `auth`, `faces`, `bedtime-faces`, or `bedtime_faces` directories are created.
 
 ```text
 /opt/mk-piclock/assets/images
 /opt/mk-piclock/assets/bedtime-images
 /opt/mk-piclock/assets/music
 /opt/mk-piclock/assets/music/.processing
+/opt/mk-piclock/assets/stories
 /opt/mk-piclock/assets/fonts
+/opt/mk-piclock/assets/default-alarm.mp3
 /opt/mk-piclock/config/clock.conf
 /opt/mk-piclock/config/event.log
-/opt/mk-piclock/auth/password.conf
-/opt/mk-piclock/web
-/opt/mk-piclock/api/openapi-v1.json
+/run/mk-piclock/core.sock
 ```
 
-The default upload limits are:
-
-```text
-PNG image:  8 MiB
-MP3 music: 64 MiB
-Font:      16 MiB
-```
-
-The API reserves 64 MiB of free storage by default before accepting or processing assets.
-
-## HTTP API
-
-The web server listens on port `8080` by default.
-
-Useful endpoints:
-
-```text
-GET  /api/v1/health
-GET  /api/v1/status
-GET  /api/v1/capabilities
-GET  /api/v1/openapi.json
-GET  /api/v1/display/preview
-POST /api/v1/display/message
-POST /api/v1/display/message/preview
-```
-
-Only authentication status and login are public. All other API routes require an authenticated session, including health, status, discovery, capabilities, and the OpenAPI schema.
-
-Documentation:
-
-* [`ADDON_API.md`](ADDON_API.md)
-* [`api/openapi-v1.json`](api/openapi-v1.json)
-
-## Service and log checks
-
-```bash
-sudo systemctl --no-pager --full status \
-  mk-piclock-core.service \
-  mk-piclock-api.service
-```
+## Service logs
 
 ```bash
 sudo journalctl -b -u mk-piclock-core.service -n 100 --no-pager
@@ -398,62 +482,33 @@ sudo journalctl -f \
   -u mk-piclock-api.service
 ```
 
-The GUI also provides a **Recent Activity** page for alarms, messages, uploads, and clock actions.
+## Known limitations
 
-## Known issues and limitations
-
-### Speaker click
-
-A small pop or click can occur when audio playback starts. This release accepts that behaviour. The MAX98357A SD / EN pad remains unconnected, and mk-piclock does not keep a permanent silent audio stream or switch amplifier power in software.
-
-### USB-C power input
-
-Some enclosure builds use a simple USB-C panel connector or breakout as a 5 V input. Many basic USB-C receptacle boards do not include the required CC pull-down resistors. A USB-C to USB-C charger may therefore refuse to provide power.
-
-A USB-A to USB-C cable is usually more dependable with these basic boards because the USB-A source supplies 5 V without USB-C CC negotiation. Use a USB-C to USB-C supply only when the input board explicitly supports USB-C power negotiation or includes the correct CC resistors.
-
-### HTTP only
-
-The built-in GUI does not provide HTTPS. Keep it on a trusted private network, behind a VPN, or behind an HTTPS reverse proxy.
-
-### One scheduled message
-
-Only one future message can be pending. A new scheduled message replaces the existing one.
-
-### Time accuracy
-
-Alarms use the Raspberry Pi system time and timezone. Scheduled messages are entered using the phone or computer local time, then converted to a Unix timestamp. Keep the Pi timezone, date, and NTP service correct.
-
-### Wi-Fi indicator
-
-The OLED shows whether `wlan0` appears connected. It does not display the SSID, signal strength, internet reachability, or router status.
-
-### Image format
-
-The OLED uses converted `.raw` files. Manually copying only a PNG is not sufficient. Uploading through the GUI is recommended because the API creates the matching raw file.
-
-### Display limits
-
-The OLED is only 256x64 pixels. Messages are limited to 180 characters and three rendered lines. The exact preview reports when a draft does not fit.
-
-### Physical OLED colour
-
-The Yellow, Green, and White selector changes browser previews only. It cannot alter the hardware panel colour.
+- The MAX98357A and speaker may make a small pop when audio starts or stops.
+- **Clear Queue** removes waiting MP3 jobs but does not cancel the active transcode.
+- The clock has no built-in battery-backed real-time clock. Accurate time after startup depends on Linux time restoration or NTP. The GUI warns when the clock is not synchronized.
+- Restore accepts backup ZIP files generated by mk-piclock. Other ZIP compression formats are rejected.
+- The GUI has no password. Network isolation is the access control.
+- USB-C power behaviour depends on the power board used in the enclosure. A USB-A to USB-C cable is often the safest choice for simple 5 V boards that do not implement USB-C power negotiation correctly.
+- The physical OLED colour is fixed by the panel. The GUI colour choice changes browser previews only.
+- Some network or SD-card fields can show **Unavailable** when the Linux driver does not expose the value.
+- The API service sandbox remains restricted. Network detection uses direct IPv4 ioctls instead of netlink discovery.
 
 ## Versions
 
 ```text
-Product:     1.6.26
-HTTP API:    1.8
-Private IPC: 11
+Product:     1.7.1
+HTTP API:    1.24
+Private IPC: 15
 ```
 
-Install and restart `mk-piclock-core` and `mk-piclock-api` together because their private IPC structures must match.
+Install the core and API from the same release, then restart both services. Installation replaces the complete web tree, and every GUI asset uses `Cache-Control: no-store`, preventing retired or cached files from surviving an upgrade.
 
 ## Documentation
 
-* Build and installation: [`INSTALL.md`](INSTALL.md)
-* Hardware wiring: [`pinouts.md`](pinouts.md)
-* HTTP API: [`ADDON_API.md`](ADDON_API.md)
-* OpenAPI schema: [`api/openapi-v1.json`](api/openapi-v1.json)
-* Release changes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+- Build and install: `INSTALL.md`
+- Hardware wiring: `pinouts.md`
+- Version history: `CHANGELOG.md`
+- HTTP API: `ADDON_API.md`
+- OpenAPI schema: `api/openapi-v1.json`
+- Current release summary: `RELEASE_NOTES.md`

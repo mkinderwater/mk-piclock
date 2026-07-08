@@ -1,42 +1,57 @@
-# mk-piclock v1.7.0 Pinouts
+# mk-piclock Release Notes Since Touch Lighting
 
-## OLED Display
+Current release: v1.7.1  
+HTTP API: 1.24  
+Private IPC: 15
 
-| OLED Pin | Function | Raspberry Pi GPIO | Physical Pin |
-| --- | --- | ---: | ---: |
-| VSS | Ground | GND | 6 |
-| VCC_IN | 3.3 V power | 3.3 V | 1 |
-| D0 / CLK | SPI clock | GPIO11 | 23 |
-| D1 / DIN | SPI MOSI | GPIO10 | 19 |
-| D/C# | Data / command | GPIO25 | 22 |
-| RES# | Reset | GPIO27 | 13 |
-| CS# | SPI CE0 | GPIO8 | 24 |
+## v1.7.1 - MP3 Queue Cleanup
 
-## MAX98357A Audio Amplifier
+This release keeps the touch-sensor LED feedback and batch MP3 upload feature, but cleans up the MP3 queue internals.
 
-| MAX98357A Pin | Function | Raspberry Pi GPIO | Physical Pin |
-| --- | --- | ---: | ---: |
-| VIN | 5 V power | 5 V | 2 or 4 |
-| GND | Ground | GND | 9 or 14 |
-| BCLK | I2S bit clock | GPIO18 | 12 |
-| LRC / WS | I2S word select | GPIO19 | 35 |
-| DIN | I2S data | GPIO21 | 40 |
+### Changes
 
-## TTP223B Touch Sensor
+- Replaced the per-file MP3 queue loop with a cleaner atomic batch queue.
+- Validates the full MP3 selection before queueing any jobs.
+- Stages all selected MP3 files before committing the batch.
+- Rolls back staged files if the batch cannot be queued.
+- Keeps new uploads blocked while any MP3 job is queued or processing.
+- Adds selected-song count and total upload size feedback on the Music page.
+- Keeps HTTP API at 1.24.
+- Keeps private IPC at 15.
 
-| Touch Pin | Function | Raspberry Pi GPIO | Physical Pin |
-| --- | --- | ---: | ---: |
-| VCC | 3.3 V power | 3.3 V | 17 |
-| GND | Ground | GND | 20 |
-| OUT / SIG | Touch input | GPIO17 | 11 |
+## v1.7.0 - Touch Lighting and Batch MP3 Uploads
 
-## RGB LED
+This release introduced touch-sensor RGB LED feedback and multi-file MP3 uploads.
 
-| LED Channel | Function | Raspberry Pi GPIO | Physical Pin |
-| --- | --- | ---: | ---: |
-| Red | Red channel | GPIO5 | 29 |
-| Green | Green channel | GPIO6 | 31 |
-| Blue | Blue channel | GPIO13 | 33 |
-| Common | Common cathode / ground | GND | 30 |
+### Changes
 
-The RGB LED is wired as common cathode. Connect the common leg to ground, and connect each colour leg through its own resistor to the listed GPIO pin.
+- Pressing the TTP223B touch sensor now blinks the RGB LED.
+- Touch blink defaults to white.
+- Touch blink colour and brightness are configurable under Lighting, Global Controls.
+- Added a high-priority temporary touch lighting scene.
+- Added batch MP3 upload support on the Music page.
+- Blocks new MP3 uploads until all queued and processing jobs are complete.
+- Added shared browser-side MP3 metadata helper for Music and Stories.
+- Audited installer and runtime directory creation.
+- Confirmed no obsolete or unused directories are created.
+- Increased HTTP API to 1.24.
+- Kept private IPC at 15.
+
+## Hardware Notes
+
+RGB LED mapping:
+
+| Channel | GPIO | Physical pin |
+| --- | ---: | ---: |
+| Red | GPIO5 | 29 |
+| Green | GPIO6 | 31 |
+| Blue | GPIO13 | 33 |
+| Common cathode | GND | 30 |
+
+Touch sensor mapping:
+
+| Signal | GPIO | Physical pin |
+| --- | ---: | ---: |
+| OUT / SIG | GPIO20 | 38 |
+
+The RGB LED is common-cathode. Each colour channel needs its own resistor.

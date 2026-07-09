@@ -36,14 +36,6 @@ Assumptions:
 
 **Estimated electronics / hardware cost per mk-piclock kids unit: $118.83 CAD**
 
-## Initial purchase cost
-
-The initial purchase cost for the listed packs is:
-
-**$238.48 CAD**
-
-This buys enough spare parts for additional builds for several components, including speakers, OLEDs, LED modules, touch modules, USB-C panel connectors, rubber feet, and USB cables.
-
 ## Not included
 
 This BOM does **not** include:

@@ -1,0 +1,62 @@
+<section class="panel dashboard-module">
+    <div id="time-sync-warning" class="card warning-card hidden" role="alert">
+        <h2>Clock time needs attention</h2>
+        <p class="no-margin">The clock is not synchronized with a network time server. Alarms may run at the wrong time.</p>
+    </div>
+    <div class="card oled-preview-card">
+        <div class="card-title-row">
+            <div>
+                <h2>What the clock is showing</h2>
+                <p class="small no-margin">This matches the screen on the clock.</p>
+            </div>
+            <span id="oled-preview-state" class="badge">Loading</span>
+        </div>
+        <div class="oled-canvas-shell">
+            <canvas id="oled-screen-preview" class="oled-canvas" width="256" height="64" aria-label="Live preview of the clock screen"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>At a glance</h2>
+        <div class="status-summary">
+            <div class="status-tile"><strong>Clock</strong><span id="summary-clock">Loading...</span></div>
+            <div class="status-tile"><strong>Sound</strong><span id="summary-sound">Loading...</span></div>
+            <div class="status-tile"><strong>Bedtime</strong><span id="summary-bedtime">Loading...</span></div>
+            <div class="status-tile"><strong>Next alarm</strong><span id="summary-next-alarm">Loading...</span></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Quick actions</h2>
+        <div class="primary-actions">
+            <button class="btn ok" type="button" data-clock-action="clock">Return to Clock</button>
+            <button class="btn" type="button" id="play-first-song">Play Music</button>
+            <button class="btn alt" type="button" data-clock-action="clear">Turn Screen Off</button>
+            <button class="btn danger" type="button" data-clock-action="stop">Stop Music</button>
+        </div>
+    </div>
+
+    <details class="card">
+        <summary>Clock details</summary>
+        <p class="advanced-note">Useful when checking the clock or asking for support.</p>
+        <table class="info-table">
+            <tbody>
+                <tr><th>Time</th><td id="status-time">Loading...</td></tr>
+                <tr><th>Date</th><td id="status-date">Loading...</td></tr>
+                <tr><th>Clock name</th><td id="status-name">Loading...</td></tr>
+                <tr><th>Software</th><td id="status-version">Loading...</td></tr>
+                <tr><th>Running for</th><td id="status-uptime">Loading...</td></tr>
+                <tr><th>Sound</th><td id="status-audio">Loading...</td></tr>
+                <tr><th>Volume</th><td id="status-volume">Loading...</td></tr>
+                <tr><th>Screen mode</th><td id="status-display">Loading...</td></tr>
+                <tr><th>Screen colour</th><td id="status-oled-color">Loading...</td></tr>
+                <tr><th>Touch button</th><td id="status-touch">Loading...</td></tr>
+                <tr><th>Clock font</th><td id="status-font">Loading...</td></tr>
+                <tr><th>Bedtime schedule</th><td id="status-bedtime">Loading...</td></tr>
+                <tr><th>Bedtime music</th><td id="status-bedtime-music">Loading...</td></tr>
+                <tr><th>Next alarm</th><td id="status-next-alarm">Loading...</td></tr>
+                <tr><th>Last successful alarm</th><td id="status-last-alarm">Loading...</td></tr>
+            </tbody>
+        </table>
+    </details>
+</section>

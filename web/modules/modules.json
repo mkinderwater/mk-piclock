@@ -1,0 +1,82 @@
+{
+  "modules": [
+    {
+      "id": "dashboard",
+      "name": "Home",
+      "group": "Everyday",
+      "enabled": true,
+      "default": true,
+      "order": 10
+    },
+    {
+      "id": "alarms",
+      "name": "Alarms",
+      "group": "Everyday",
+      "enabled": true,
+      "order": 20
+    },
+    {
+      "id": "message",
+      "name": "Messages",
+      "group": "Everyday",
+      "enabled": true,
+      "order": 30
+    },
+    {
+      "id": "music",
+      "name": "Music",
+      "group": "Everyday",
+      "enabled": true,
+      "order": 40
+    },
+    {
+      "id": "lighting",
+      "name": "Lighting",
+      "group": "Everyday",
+      "enabled": true,
+      "order": 45
+    },
+    {
+      "id": "stories",
+      "name": "Stories",
+      "group": "Everyday",
+      "enabled": true,
+      "order": 50
+    },
+    {
+      "id": "images",
+      "name": "Day Images",
+      "group": "Everyday",
+      "enabled": true,
+      "order": 60
+    },
+    {
+      "id": "bedtime-images",
+      "name": "Bedtime Images",
+      "group": "Everyday",
+      "enabled": true,
+      "order": 70
+    },
+    {
+      "id": "display",
+      "name": "Display",
+      "group": "Settings",
+      "enabled": true,
+      "order": 80
+    },
+    {
+      "id": "system",
+      "name": "System",
+      "group": "Settings",
+      "enabled": true,
+      "order": 90
+    },
+    {
+      "id": "log",
+      "name": "Recent Activity",
+      "group": "Help",
+      "enabled": true,
+      "order": 100
+    }
+  ]
+}

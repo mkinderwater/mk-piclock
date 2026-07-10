@@ -12,6 +12,7 @@ WorkingDirectory=/opt/mk-piclock
 Restart=always
 RestartSec=3
 UMask=0027
+LimitRTPRIO=10
 RuntimeDirectory=mk-piclock
 RuntimeDirectoryMode=0770
 
@@ -26,10 +27,10 @@ LockPersonality=true
 ProtectKernelLogs=true
 ProtectClock=true
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET
 ReadWritePaths=/opt/mk-piclock/config /run/mk-piclock
 
-# The core owns the OLED, GPIO touch input, audio and persistent clock state.
+# The core owns the OLED, RGB LED, GPIO touch input, audio and persistent clock state.
 # Its private SOCK_SEQPACKET socket is /run/mk-piclock/core.sock.
 
 [Install]

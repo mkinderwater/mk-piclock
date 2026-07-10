@@ -1,0 +1,62 @@
+<section class="panel message-module">
+    <div class="card">
+        <h2>Send a Message</h2>
+        <p class="page-intro">Send a picture, a short note, or both. It will stay on screen for 30 seconds.</p>
+        <form id="message-form" method="POST" action="/api/v1/display/message" data-module-handles-submit="true">
+            <label for="message-image-choice">Picture</label>
+            <select id="message-image-choice"></select>
+            <input id="message-image-file" name="image_file" type="hidden" value="">
+            <input id="message-image-bedtime" name="image_bedtime" type="hidden" value="0">
+            <p class="small muted">Choose a Day Image or Bedtime Image. A random choice shows one example here, then chooses a picture when sent.</p>
+
+            <label for="message-text">Message</label>
+            <textarea id="message-text" name="message_text" rows="3" maxlength="180" placeholder="Type your message" autocomplete="off" spellcheck="true"></textarea>
+            <p id="message-text-help" class="small muted">0 / 180 characters</p>
+
+            <div class="oled-preview-wrap">
+                <div class="card-title-row">
+                    <strong>Clock preview</strong>
+                    <span id="message-preview-state" class="badge">Updating</span>
+                </div>
+                <div class="oled-canvas-shell">
+                    <canvas id="message-oled-canvas" class="oled-canvas" width="256" height="64" aria-label="Exact OLED message preview"></canvas>
+                </div>
+                <div class="small muted">This matches the physical clock screen.</div>
+            </div>
+
+            <label class="choice-row" for="message-notification-sound">
+                <input id="message-notification-sound" name="notification_sound" type="checkbox" value="1">
+                <span><strong>Play a chime</strong><small>Plays a short, gentle sound when the message appears.</small></span>
+            </label>
+
+            <label for="message-delivery-mode">When should it appear?</label>
+            <select id="message-delivery-mode">
+                <option value="now" selected>Right away</option>
+                <option value="delay">After a short wait</option>
+                <option value="time">At a date and time</option>
+            </select>
+
+            <div id="message-delay-fields" class="hidden">
+                <label for="message-delay">Wait</label>
+                <select id="message-delay">
+                    <option value="10">10 seconds</option>
+                    <option value="30">30 seconds</option>
+                    <option value="60">1 minute</option>
+                </select>
+            </div>
+
+            <div id="message-time-fields" class="hidden">
+                <label for="message-scheduled-time">Date and time</label>
+                <input id="message-scheduled-time" type="datetime-local" step="60">
+                <p class="small muted">The time comes from this phone or computer. A new scheduled message replaces the old one.</p>
+            </div>
+            <div id="message-pending" class="small muted">No message is scheduled.</div>
+
+            <div id="message-send-status" class="message-send-status hidden" role="status"></div>
+            <div class="message-actions">
+                <button id="message-submit" class="btn ok" type="submit">Send Message</button>
+                <button id="message-clear" class="btn alt" type="button">Clear</button>
+            </div>
+        </form>
+    </div>
+</section>

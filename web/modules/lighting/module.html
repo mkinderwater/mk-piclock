@@ -1,0 +1,67 @@
+<section class="module-page lighting-module">
+    <div class="card lighting-status-card">
+        <div class="card-title-row">
+            <h2>RGB Lighting</h2>
+            <span id="lighting-status" class="badge">Loading</span>
+        </div>
+        <p class="page-intro">Set activity colours, brightness, timing, calibration, and bedtime behaviour.</p>
+        <div class="lighting-current">
+            <span>Active mode: <strong id="lighting-active-mode">Loading</strong></span>
+            <span class="lighting-live-swatch" id="lighting-live-colour-swatch" aria-hidden="true"></span>
+            <span>Colour <span class="mono" id="lighting-live-colour">#000000</span></span>
+            <span class="lighting-live-swatch" id="lighting-live-output-swatch" aria-hidden="true"></span>
+            <span>Output <span class="mono" id="lighting-live-output">#000000</span></span>
+        </div>
+        <p class="small no-margin" id="lighting-runtime-details">Priority: touch, alarm, message, stories, music, bedtime, daytime.</p>
+    </div>
+
+    <form id="lighting-global-form" class="card lighting-global-card" data-module-handles-submit="true">
+        <div class="card-title-row">
+            <h2>Global Controls</h2>
+            <span class="badge">All modes</span>
+        </div>
+        <div class="lighting-toggle-grid">
+            <label class="check-row"><input type="checkbox" name="enabled" checked> Enable RGB lighting</label>
+            <label class="check-row"><input type="checkbox" name="idle_off"> Keep lighting off when idle</label>
+            <label class="check-row"><input type="checkbox" name="touch_blink_enabled" checked> Blink on touch</label>
+        </div>
+        <div class="lighting-global-grid">
+            <div>
+                <label for="lighting-max-brightness">Maximum brightness <output for="lighting-max-brightness">100%</output></label>
+                <input id="lighting-max-brightness" type="range" name="max_brightness" min="0" max="100" step="1" value="100">
+            </div>
+            <div>
+                <label for="lighting-bedtime-fade">Bedtime fade <output for="lighting-bedtime-fade">15 min</output></label>
+                <input id="lighting-bedtime-fade" type="range" name="bedtime_fade_minutes" min="0" max="120" step="5" value="15">
+                <p class="small no-margin">Gradually transitions daytime brightness toward the bedtime level. Set to 0 to disable.</p>
+            </div>
+            <div>
+                <label for="lighting-touch-colour">Touch blink colour</label>
+                <input id="lighting-touch-colour" type="color" name="touch_blink_color" value="#ffffff">
+            </div>
+            <div>
+                <label for="lighting-touch-brightness">Touch blink brightness <output for="lighting-touch-brightness">60%</output></label>
+                <input id="lighting-touch-brightness" type="range" name="touch_blink_brightness" min="0" max="100" step="1" value="60">
+            </div>
+        </div>
+        <h3>Colour Calibration</h3>
+        <p class="small no-margin">Adjust channel strength until white looks neutral through the installed charm.</p>
+        <div class="lighting-calibration-grid">
+            <div><label for="lighting-red-gain">Red <output for="lighting-red-gain">100%</output></label><input id="lighting-red-gain" type="range" name="red_gain" min="0" max="100" value="100"></div>
+            <div><label for="lighting-green-gain">Green <output for="lighting-green-gain">65%</output></label><input id="lighting-green-gain" type="range" name="green_gain" min="0" max="100" value="65"></div>
+            <div><label for="lighting-blue-gain">Blue <output for="lighting-blue-gain">80%</output></label><input id="lighting-blue-gain" type="range" name="blue_gain" min="0" max="100" value="80"></div>
+        </div>
+        <div class="lighting-test-row" aria-label="LED wiring tests">
+            <button class="btn alt" type="button" data-led-test="#ff0000">Test Red</button>
+            <button class="btn alt" type="button" data-led-test="#00ff00">Test Green</button>
+            <button class="btn alt" type="button" data-led-test="#0000ff">Test Blue</button>
+            <button class="btn alt" type="button" data-led-test="#ffffff">Test White</button>
+        </div>
+        <div class="lighting-actions">
+            <button class="btn alt" type="button" data-global-reset>Reset Defaults</button>
+            <button class="btn" type="submit">Save Global Controls</button>
+        </div>
+    </form>
+
+    <div id="lighting-profiles" class="lighting-grid"></div>
+</section>

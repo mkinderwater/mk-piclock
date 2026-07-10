@@ -9,6 +9,10 @@
 struct mp_id3_metadata {
     char title[MP_ID3_TEXT_MAX];
     char artist[MP_ID3_TEXT_MAX];
+    char album[MP_ID3_TEXT_MAX];
+    char year[32];
+    char track[32];
+    char genre[MP_ID3_TEXT_MAX];
 };
 
 struct mp_buffer {

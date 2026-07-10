@@ -29,7 +29,7 @@ ProtectKernelLogs=true
 ProtectClock=true
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET
-ReadWritePaths=/opt/mk-piclock/assets
+ReadWritePaths=/opt/mk-piclock/assets /opt/mk-piclock/config
 
 [Install]
 WantedBy=multi-user.target

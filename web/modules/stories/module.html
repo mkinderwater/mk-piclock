@@ -1,0 +1,55 @@
+<section class="panel stories-module">
+    <div class="card">
+        <h2>Story Mode</h2>
+        <p class="page-intro">When enabled, ten quick taps on the touch sensor start a random story. One tap stops a playing story.</p>
+        <form id="story-settings-form" method="POST" action="/api/v1/config/audio" data-busy-text="Saving Story Mode..." data-success-text="Story Mode saved" data-error-text="Story Mode could not be saved">
+            <input id="story-enabled-value" type="hidden" name="story_enabled" value="0">
+            <label class="choice-row" for="story-enabled">
+                <input id="story-enabled" type="checkbox">
+                <span><strong>Enable Story Mode</strong><small>Ten short taps within eight seconds play a random story.</small></span>
+            </label>
+
+            <label for="story-volume">Story volume <output id="story-volume-value" class="inline-output" for="story-volume">55%</output></label>
+            <input id="story-volume" type="range" name="story_volume" min="0" max="100" step="1" value="55">
+
+            <label for="story-message">Intro message</label>
+            <input id="story-message" name="story_message" maxlength="40" value="STORY MODE!" autocomplete="off">
+            <p class="small">The OLED first shows random bedtime images and this message, then the selected story title, then the normal clock.</p>
+            <button class="btn" type="submit">Save Story Mode</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="status-summary">
+            <div class="status-tile"><strong>Mode</strong><span id="story-mode-status">Loading...</span></div>
+            <div class="status-tile"><strong>Now</strong><span id="story-current">Loading...</span></div>
+            <div class="status-tile"><strong>Library</strong><span id="story-count">Loading...</span></div>
+        </div>
+        <div class="button-row">
+            <button class="btn ok" type="button" id="play-random-story">Play Random Story</button>
+            <button class="btn alt" type="button" data-story-stop>Stop Playback</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Add Story</h2>
+        <p class="page-intro">Choose one MP3 story. Stories are stored separately from music and are not included in backups.</p>
+        <form id="story-upload-form" method="POST" action="/api/v1/assets/stories/upload" enctype="multipart/form-data" data-module-handles-submit="true">
+            <label for="story-file">Choose story MP3</label>
+            <input id="story-file" type="file" name="file" accept="audio/mpeg,.mp3" required>
+            <button class="btn" type="submit">Add Story</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Your Stories</h2>
+        <div id="story-list" class="cards compact-cards"></div>
+        <details class="danger-details">
+            <summary>Story library options</summary>
+            <div class="button-row">
+                <button class="btn danger small-btn" type="button" data-story-stop>Stop Playback</button>
+                <button class="btn danger small-btn" type="button" id="delete-all-stories">Delete All Stories</button>
+            </div>
+        </details>
+    </div>
+</section>

@@ -359,7 +359,7 @@ static void mp_parse_id3v2_frames(const unsigned char *tag, size_t length, int v
         pos = skip;
     }
 
-    while (pos < length && (!metadata->title[0] || !metadata->artist[0])) {
+    while (pos < length) {
         char id[5] = "";
         uint32_t frame_size = 0;
         size_t header_size = version == 2 ? 6u : 10u;
@@ -387,10 +387,27 @@ static void mp_parse_id3v2_frames(const unsigned char *tag, size_t length, int v
                        (version >= 3 && strcmp(id, "TIT2") == 0);
         int is_artist = (version == 2 && strcmp(id, "TP1") == 0) ||
                         (version >= 3 && strcmp(id, "TPE1") == 0);
+        int is_album = (version == 2 && strcmp(id, "TAL") == 0) ||
+                       (version >= 3 && strcmp(id, "TALB") == 0);
+        int is_year = (version == 2 && strcmp(id, "TYE") == 0) ||
+                      (version == 3 && strcmp(id, "TYER") == 0) ||
+                      (version == 4 && strcmp(id, "TDRC") == 0);
+        int is_track = (version == 2 && strcmp(id, "TRK") == 0) ||
+                       (version >= 3 && strcmp(id, "TRCK") == 0);
+        int is_genre = (version == 2 && strcmp(id, "TCO") == 0) ||
+                       (version >= 3 && strcmp(id, "TCON") == 0);
         if (is_title && !metadata->title[0])
             mp_decode_id3_text(payload, frame_size, metadata->title, sizeof(metadata->title));
         else if (is_artist && !metadata->artist[0])
             mp_decode_id3_text(payload, frame_size, metadata->artist, sizeof(metadata->artist));
+        else if (is_album && !metadata->album[0])
+            mp_decode_id3_text(payload, frame_size, metadata->album, sizeof(metadata->album));
+        else if (is_year && !metadata->year[0])
+            mp_decode_id3_text(payload, frame_size, metadata->year, sizeof(metadata->year));
+        else if (is_track && !metadata->track[0])
+            mp_decode_id3_text(payload, frame_size, metadata->track, sizeof(metadata->track));
+        else if (is_genre && !metadata->genre[0])
+            mp_decode_id3_text(payload, frame_size, metadata->genre, sizeof(metadata->genre));
         pos += frame_size;
     }
 }
@@ -414,7 +431,8 @@ int mp_read_id3_metadata(const char *path, struct mp_id3_metadata *metadata) {
         }
     }
 
-    if (!metadata->title[0] || !metadata->artist[0]) {
+    if (!metadata->title[0] || !metadata->artist[0] || !metadata->album[0] ||
+        !metadata->year[0] || !metadata->track[0]) {
         if (fseek(file, -128, SEEK_END) == 0) {
             unsigned char tail[128];
             if (fread(tail, 1, sizeof(tail), file) == sizeof(tail) && memcmp(tail, "TAG", 3) == 0) {
@@ -422,11 +440,18 @@ int mp_read_id3_metadata(const char *path, struct mp_id3_metadata *metadata) {
                     mp_decode_id3v1_field(tail + 3, 30, metadata->title, sizeof(metadata->title));
                 if (!metadata->artist[0])
                     mp_decode_id3v1_field(tail + 33, 30, metadata->artist, sizeof(metadata->artist));
+                if (!metadata->album[0])
+                    mp_decode_id3v1_field(tail + 63, 30, metadata->album, sizeof(metadata->album));
+                if (!metadata->year[0])
+                    mp_decode_id3v1_field(tail + 93, 4, metadata->year, sizeof(metadata->year));
+                if (!metadata->track[0] && tail[125] == 0 && tail[126] != 0)
+                    snprintf(metadata->track, sizeof(metadata->track), "%u", (unsigned int)tail[126]);
             }
         }
     }
     fclose(file);
-    return metadata->title[0] || metadata->artist[0] ? 0 : -1;
+    return metadata->title[0] || metadata->artist[0] || metadata->album[0] ||
+           metadata->year[0] || metadata->track[0] || metadata->genre[0] ? 0 : -1;
 }
 
 void mp_title_from_filename(const char *filename, char *out, size_t out_len) {

@@ -1,0 +1,5 @@
+.alarms-module .alarm-card h2 { margin: 0; }
+.alarms-module .day-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+.alarms-module .day-pill { display: flex; min-height: 36px; align-items: center; justify-content: center; gap: 5px; margin: 0; padding: 6px; border: 1px solid var(--line-dark); border-radius: 4px; background: var(--panel-soft); cursor: pointer; letter-spacing: 0; text-transform: none; }
+.alarms-module .day-pill input { width: auto; min-height: 0; margin: 0; }
+@media (min-width: 620px) { .alarms-module .day-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); } }

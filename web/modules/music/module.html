@@ -1,0 +1,88 @@
+<section class="panel music-module">
+    <div class="card">
+        <h2>Music</h2>
+        <div class="status-summary">
+            <div class="status-tile"><strong>Now</strong><span id="music-status">Loading...</span></div>
+            <div class="status-tile"><strong>Song</strong><span id="music-current">Loading...</span></div>
+            <div class="status-tile"><strong>Library</strong><span id="music-count">Loading...</span></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Volume</h2>
+        <form method="POST" action="/api/v1/config/audio" data-busy-text="Saving sound settings..." data-success-text="Sound settings saved" data-error-text="Sound settings could not be saved">
+            <label for="global-volume">Normal volume <output id="global-volume-value" class="inline-output" for="global-volume">80%</output></label>
+            <input id="global-volume" type="range" name="global_volume" min="0" max="100" step="1" value="80">
+            <input id="show-song-metadata-value" type="hidden" name="show_song_metadata" value="1">
+            <label class="choice-row" for="show-song-metadata">
+                <input id="show-song-metadata" type="checkbox" checked>
+                <span><strong>Show song name on the clock</strong><small>Long names scroll across the bottom of the screen.</small></span>
+            </label>
+            <button class="btn" type="submit">Save Volume</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Add Music</h2>
+        <p class="page-intro">Choose one or more MP3 files. Wait for the full batch to finish before adding more.</p>
+        <form id="music-upload-form" method="POST" action="/api/v1/assets/music/upload" enctype="multipart/form-data" data-module-handles-submit="true">
+            <label for="music-files">Choose songs</label>
+            <input id="music-files" type="file" name="file" accept="audio/mpeg,.mp3" multiple required>
+            <div id="music-selection-summary" class="small muted">No songs selected.</div>
+
+            <details class="advanced-settings">
+                <summary>Sound quality options</summary>
+                <p class="advanced-note">The recommended settings are best for the 4-ohm, 3-watt mono speaker.</p>
+                <div class="music-settings-grid">
+                    <div>
+                        <label for="music-bitrate">File quality</label>
+                        <select id="music-bitrate" name="bitrate_kbps">
+                            <option value="64">Smaller file</option>
+                            <option value="96" selected>Recommended</option>
+                            <option value="128">Higher quality</option>
+                            <option value="160">Highest quality</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="music-sample-rate">Sample rate</label>
+                        <select id="music-sample-rate" name="sample_rate_hz">
+                            <option value="32000">32 kHz</option>
+                            <option value="44100" selected>44.1 kHz</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="music-lowpass">Frequency range</label>
+                        <select id="music-lowpass" name="lowpass_hz">
+                            <option value="12000">Voice</option>
+                            <option value="16000" selected>Recommended</option>
+                            <option value="18000">More detail</option>
+                        </select>
+                    </div>
+                </div>
+            </details>
+
+            <button class="btn" type="submit">Add Music</button>
+        </form>
+    </div>
+
+    <div class="card hidden" id="music-processing-card">
+        <h2>Preparing Music</h2>
+        <p class="small">New uploads are blocked until every queued song is ready. Clear Queue removes waiting files, but does not stop a song already processing.</p>
+        <div class="button-row">
+            <button class="btn danger small-btn" type="button" id="clear-music-queue">Clear Queue</button>
+        </div>
+        <div id="music-jobs" class="cards compact-cards"></div>
+    </div>
+
+    <div class="card">
+        <h2>Your Music</h2>
+        <div id="music-list" class="cards compact-cards"></div>
+        <details class="danger-details">
+            <summary>Music library options</summary>
+            <div class="button-row">
+                <button class="btn danger small-btn" type="button" data-music-stop>Stop Playback</button>
+                <button class="btn danger small-btn" type="button" id="delete-all-music">Delete All Music</button>
+            </div>
+        </details>
+    </div>
+</section>

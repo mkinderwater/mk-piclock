@@ -1,0 +1,5 @@
+.log-module .log-card { min-height: 260px; }
+.log-module .log-list { max-height: 62vh; overflow: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 4px; background: #111821; color: #d9e4ef; }
+.log-module .log-line { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.08); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-module .log-line:last-child { border-bottom: 0; }
+.log-module .log-empty { padding: 16px; color: #9ba9b8; text-align: center; }

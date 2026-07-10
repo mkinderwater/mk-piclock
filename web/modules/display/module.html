@@ -1,0 +1,118 @@
+<section class="panel display-module">
+    <div class="card">
+        <h2>Clock Name</h2>
+        <p class="page-intro">This appears at the top of the controls and when the clock starts.</p>
+        <form method="POST" action="/api/v1/config/personalization" data-busy-text="Saving clock name..." data-success-text="Clock name saved" data-error-text="Clock name could not be saved">
+            <label for="clock-name">Name</label>
+            <input id="clock-name" type="text" name="clock_name" maxlength="63" placeholder="Rylie Bear">
+            <button class="btn" type="submit">Save Name</button>
+        </form>
+        <p class="small no-margin">Startup message: <strong>Hi <span id="startup-name-preview">...</span></strong> · Version <span id="startup-version-preview">...</span></p>
+    </div>
+
+    <div class="card">
+        <h2>Screen Colour</h2>
+        <p class="page-intro">Choose the colour of the physical screen so previews look correct.</p>
+        <form method="POST" action="/api/v1/config/display" data-busy-text="Saving screen colour..." data-success-text="Screen colour saved" data-error-text="Screen colour could not be saved">
+            <label for="oled-color">Colour</label>
+            <select id="oled-color" name="oled_color">
+                <option value="yellow">Yellow</option>
+                <option value="green">Green</option>
+                <option value="white">White</option>
+            </select>
+            <button class="btn" type="submit">Save Colour</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Bedtime Display</h2>
+        <p class="page-intro">Dim the screen automatically during sleeping hours.</p>
+        <form method="POST" action="/api/v1/config/display" id="bedtime-form" data-busy-text="Saving bedtime display..." data-success-text="Bedtime display saved" data-error-text="Bedtime display could not be saved">
+            <input type="hidden" id="bed-oled-font-file" name="oled_font_file">
+            <input type="hidden" id="bed-oled-font" name="oled_font">
+            <input type="hidden" id="bed-oled-font-size" name="oled_font_size">
+            <input type="hidden" id="bed-clock-24h-mode" name="clock_24h_mode">
+            <label for="bedtime-enabled">Use bedtime display</label>
+            <select id="bedtime-enabled" name="bedtime_enabled"><option value="1">Yes</option><option value="0">No</option></select>
+            <div class="brightness-control">
+                <label for="bedtime-dim-percent">Night brightness <output id="bedtime-dim-value" for="bedtime-dim-percent">35%</output></label>
+                <input id="bedtime-dim-percent" type="range" name="bedtime_dim_percent" min="0" max="100" step="1" value="35">
+                <div class="slider-scale" aria-hidden="true"><span>Off</span><span>Half</span><span>Full</span></div>
+                <p class="small no-margin">Move the slider to preview the real screen brightness.</p>
+            </div>
+            <div class="field-row">
+                <div><label for="bedtime-start">Starts at</label><input id="bedtime-start" type="time" name="bedtime_start" value="21:00"></div>
+                <div><label for="bedtime-end">Ends at</label><input id="bedtime-end" type="time" name="bedtime_end" value="07:00"></div>
+            </div>
+            <label for="bedtime-music-enabled">Allow touch music during bedtime</label>
+            <select id="bedtime-music-enabled" name="bedtime_music_enabled">
+                <option value="0">No</option>
+                <option value="1">Yes</option>
+            </select>
+            <p class="small">When disabled, holding the touch sensor cannot start music during bedtime hours. Alarms still work.</p>
+            <button class="btn" type="submit">Save Bedtime Display</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Clock Format</h2>
+        <form method="POST" action="/api/v1/config/display" id="font-form" data-busy-text="Saving clock style..." data-success-text="Clock style saved" data-error-text="Clock style could not be saved">
+            <input type="hidden" id="font-bedtime-enabled" name="bedtime_enabled">
+            <input type="hidden" id="font-bedtime-start" name="bedtime_start">
+            <input type="hidden" id="font-bedtime-end" name="bedtime_end">
+            <input type="hidden" id="font-bedtime-dim-percent" name="bedtime_dim_percent">
+            <input type="hidden" id="oled-font-file" name="oled_font_file">
+            <input type="hidden" id="oled-font" name="oled_font">
+            <input type="hidden" id="oled-font-size" name="oled_font_size" value="48">
+            <label for="clock-24h-mode">Time format</label>
+            <select id="clock-24h-mode" name="clock_24h_mode"><option value="0">12-hour, such as 7:30 PM</option><option value="1">24-hour, such as 19:30</option></select>
+            <button class="btn" type="submit">Save Time Format</button>
+        </form>
+    </div>
+
+    <details class="card">
+        <summary>Font options</summary>
+        <p class="advanced-note">Most people can leave these settings alone.</p>
+        <div class="details-body">
+            <div>
+                <h2>Current Clock Font</h2>
+                <table class="info-table mini"><tbody><tr><th>Selected</th><td id="selected-font">Loading...</td></tr></tbody></table>
+                <div id="selected-font-preview" class="font-preview-area"><div class="small muted">Loading font preview...</div></div>
+            </div>
+
+            <form method="POST" action="/api/v1/assets/fonts/upload" enctype="multipart/form-data" data-busy-text="Adding font..." data-success-text="Font added" data-error-text="Font could not be added">
+                <label>Upload a font file</label>
+                <input type="file" name="file" accept=".ttf,.otf,font/ttf,font/otf">
+                <button class="btn" type="submit">Add Font</button>
+            </form>
+
+            <form method="POST" action="/api/v1/config/display" id="advanced-font-form" data-busy-text="Saving font settings..." data-success-text="Font settings saved" data-error-text="Font settings could not be saved">
+                <input type="hidden" name="bedtime_enabled" id="advanced-bedtime-enabled">
+                <input type="hidden" name="bedtime_start" id="advanced-bedtime-start">
+                <input type="hidden" name="bedtime_end" id="advanced-bedtime-end">
+                <input type="hidden" name="bedtime_dim_percent" id="advanced-bedtime-dim-percent">
+                <input type="hidden" name="clock_24h_mode" id="advanced-clock-24h-mode">
+                <label for="advanced-oled-font-file">Uploaded font</label>
+                <select id="advanced-oled-font-file" name="oled_font_file"></select>
+                <div class="field-row">
+                    <div><label for="advanced-oled-font">Built-in font</label><select id="advanced-oled-font" name="oled_font"></select></div>
+                    <div><label for="advanced-oled-font-size">Font size</label><input id="advanced-oled-font-size" type="number" name="oled_font_size" min="18" max="54" value="48"></div>
+                </div>
+                <button class="btn" type="submit">Save Font</button>
+            </form>
+
+            <div>
+                <h2>Uploaded Fonts</h2>
+                <div id="delete-fonts" class="cards compact-cards"></div>
+            </div>
+        </div>
+    </details>
+
+    <details class="card">
+        <summary>Screen controls</summary>
+        <div class="button-grid details-body">
+            <button class="btn ok" type="button" data-clock-action="clock">Return to Clock</button>
+            <button class="btn alt" type="button" data-clock-action="clear">Turn Screen Off</button>
+        </div>
+    </details>
+</section>

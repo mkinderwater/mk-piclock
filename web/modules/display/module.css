@@ -1,0 +1,11 @@
+.display-module .font-preview-area { margin: 10px 0; }
+.display-module .font-preview-card { padding: 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-soft); }
+.display-module .font-sample-box { margin-top: 8px; padding: 10px; overflow: hidden; border: 1px solid #26313d; border-radius: 4px; background: #071009; color: var(--oled-color); font-size: 24px; line-height: 1.2; white-space: nowrap; text-shadow: 0 0 5px var(--oled-color-glow); }
+.display-module .font-sample-box div + div { margin-top: 4px; }
+.display-module .builtin-sample { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.display-module .font-delete-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+@media (max-width: 560px) { .display-module .font-delete-row { grid-template-columns: 1fr; } }
+
+.display-module .brightness-control output { float: right; color: var(--main); font-size: 14px; font-weight: 900; }
+.display-module input[type="range"] { min-height: 28px; margin-bottom: 0; padding: 0; cursor: pointer; accent-color: var(--main); }
+.display-module .slider-scale { display: flex; justify-content: space-between; margin: 0 1px 6px; color: var(--muted); font-size: 11px; font-weight: 700; }

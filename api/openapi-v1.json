@@ -1,0 +1,2957 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "mk-piclock API",
+    "version": "1.25",
+    "description": "Local HTTP API for mk-piclock 1.7.6. A simple optional plaintext password can protect API routes on the trusted home network."
+  },
+  "servers": [
+    {
+      "url": "http://{clockHost}:{apiPort}",
+      "variables": {
+        "clockHost": {
+          "default": "mk-piclock"
+        },
+        "apiPort": {
+          "default": "8080"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "System"
+    },
+    {
+      "name": "Assets"
+    },
+    {
+      "name": "Display"
+    },
+    {
+      "name": "Configuration"
+    },
+    {
+      "name": "Lighting"
+    },
+    {
+      "name": "Logs"
+    }
+  ],
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "summary": "API discovery",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/capabilities": {
+      "get": {
+        "summary": "List capabilities",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "summary": "OpenAPI document",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/status": {
+      "get": {
+        "summary": "Check whether a web password is configured and whether this browser is authenticated",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Authentication state"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "summary": "Authenticate with the optional web password",
+        "tags": [
+          "System"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated or no password is configured"
+          },
+          "401": {
+            "description": "Incorrect password"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "summary": "Set or remove the optional plaintext web password",
+        "tags": [
+          "System"
+        ],
+        "description": "Send an empty password to remove password protection.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password setting updated"
+          },
+          "400": {
+            "description": "Invalid password"
+          },
+          "401": {
+            "description": "Authentication required when a password already exists"
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "summary": "Health check",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "summary": "Current clock state",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "description": "Returns live display, audio, bedtime, touch, image, font, message, alarm, and calibrated RGB lighting state."
+      }
+    },
+    "/api/v1/assets/images": {
+      "get": {
+        "summary": "List normal images",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "normal",
+                        "bedtime"
+                      ]
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "max_page": {
+                      "type": "integer"
+                    },
+                    "per_page": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "images": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "images"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "all",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                0,
+                1
+              ],
+              "default": 0
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/assets/bedtime-images": {
+      "get": {
+        "summary": "List bedtime images",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "normal",
+                        "bedtime"
+                      ]
+                    },
+                    "page": {
+                      "type": "integer"
+                    },
+                    "max_page": {
+                      "type": "integer"
+                    },
+                    "per_page": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "images": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "images"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "all",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                0,
+                1
+              ],
+              "default": 0
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/assets/images/source": {
+      "get": {
+        "summary": "Read normal source PNG",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "contentEncoding": "binary"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "file",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/assets/bedtime-images/source": {
+      "get": {
+        "summary": "Read bedtime source PNG",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "contentEncoding": "binary"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "file",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/assets/fonts": {
+      "get": {
+        "summary": "List fonts",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/fonts/file": {
+      "get": {
+        "summary": "Read uploaded font",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "contentEncoding": "binary"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "file",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/assets/music": {
+      "get": {
+        "summary": "List music and ID3 metadata",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "global_volume": {
+                      "type": "integer"
+                    },
+                    "current": {
+                      "type": "string"
+                    },
+                    "tracks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "file": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "artist": {
+                            "type": "string"
+                          },
+                          "display": {
+                            "type": "string"
+                          },
+                          "id3": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "album": {
+                            "type": "string"
+                          },
+                          "year": {
+                            "type": "string"
+                          },
+                          "track": {
+                            "type": "string"
+                          },
+                          "genre": {
+                            "type": "string"
+                          },
+                          "duration_seconds": {
+                            "type": "number",
+                            "format": "double"
+                          },
+                          "duration_estimated": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "bitrate_kbps": {
+                            "type": "integer"
+                          },
+                          "bitrate_mode": {
+                            "type": "string",
+                            "enum": [
+                              "CBR",
+                              "VBR",
+                              "ABR"
+                            ]
+                          },
+                          "sample_rate_hz": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "channels": {
+                            "type": "integer"
+                          },
+                          "mpeg_layer": {
+                            "type": "integer"
+                          },
+                          "file_size_bytes": {
+                            "type": "integer",
+                            "format": "int64"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/jobs": {
+      "get": {
+        "summary": "List recent MP3 processing jobs",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "jobs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "queued",
+                              "processing",
+                              "complete",
+                              "failed"
+                            ]
+                          },
+                          "progress": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100
+                          },
+                          "file": {
+                            "type": "string"
+                          },
+                          "error": {
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "completed_at": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "bitrate_kbps": {
+                            "type": "integer",
+                            "enum": [
+                              64,
+                              96,
+                              128,
+                              160
+                            ],
+                            "default": 96
+                          },
+                          "sample_rate_hz": {
+                            "type": "integer",
+                            "enum": [
+                              32000,
+                              44100
+                            ],
+                            "default": 44100
+                          },
+                          "lowpass_hz": {
+                            "type": "integer",
+                            "enum": [
+                              12000,
+                              16000,
+                              18000
+                            ],
+                            "default": 16000
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/jobs/clear": {
+      "post": {
+        "summary": "Remove waiting MP3 jobs",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Waiting jobs removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "queued_removed": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "processing_active": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "queued_removed",
+                    "processing_active"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/images/upload": {
+      "post": {
+        "summary": "Upload normal PNG images",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "contentEncoding": "binary"
+                    }
+                  }
+                },
+                "required": [
+                  "files"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/bedtime-images/upload": {
+      "post": {
+        "summary": "Upload bedtime PNG images",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "contentEncoding": "binary"
+                    }
+                  }
+                },
+                "required": [
+                  "files"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/upload": {
+      "post": {
+        "summary": "Upload one or more MP3 files for asynchronous optimization",
+        "tags": [
+          "Assets"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "contentEncoding": "binary"
+                  },
+                  "bitrate_kbps": {
+                    "type": "integer",
+                    "enum": [
+                      64,
+                      96,
+                      128,
+                      160
+                    ],
+                    "default": 96
+                  },
+                  "sample_rate_hz": {
+                    "type": "integer",
+                    "enum": [
+                      32000,
+                      44100
+                    ],
+                    "default": 44100
+                  },
+                  "lowpass_hz": {
+                    "type": "integer",
+                    "enum": [
+                      12000,
+                      16000,
+                      18000
+                    ],
+                    "default": 16000
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "File accepted for asynchronous processing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "queued": {
+                      "type": "integer"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "settings": {
+                      "type": "object",
+                      "properties": {
+                        "bitrate_kbps": {
+                          "type": "integer",
+                          "enum": [
+                            64,
+                            96,
+                            128,
+                            160
+                          ],
+                          "default": 96
+                        },
+                        "sample_rate_hz": {
+                          "type": "integer",
+                          "enum": [
+                            32000,
+                            44100
+                          ],
+                          "default": 44100
+                        },
+                        "lowpass_hz": {
+                          "type": "integer",
+                          "enum": [
+                            12000,
+                            16000,
+                            18000
+                          ],
+                          "default": 16000
+                        }
+                      }
+                    },
+                    "job_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "format": "int64"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No valid MP3 files or unsupported settings"
+          },
+          "507": {
+            "description": "Insufficient storage"
+          },
+          "409": {
+            "description": "Another MP3 is queued or processing"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/delete": {
+      "post": {
+        "summary": "Delete one processed music file",
+        "tags": [
+          "Assets"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filename"
+          },
+          "409": {
+            "description": "The same filename is still processing"
+          },
+          "500": {
+            "description": "File could not be deleted"
+          },
+          "503": {
+            "description": "Deleted, but the clock core could not be notified"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/fonts/upload": {
+      "post": {
+        "summary": "Upload a TTF or OTF font",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "contentEncoding": "binary"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/images/delete": {
+      "post": {
+        "summary": "Delete normal image",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/bedtime-images/delete": {
+      "post": {
+        "summary": "Delete bedtime image",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/fonts/delete": {
+      "post": {
+        "summary": "Delete font",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/images/delete-all": {
+      "post": {
+        "summary": "Delete all normal images",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/bedtime-images/delete-all": {
+      "post": {
+        "summary": "Delete all bedtime images",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/delete-all": {
+      "post": {
+        "summary": "Delete all music",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          },
+          "409": {
+            "description": "Music processing is active"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/display/action": {
+      "post": {
+        "summary": "Run display or audio action",
+        "tags": [
+          "Display"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          },
+          "409": {
+            "description": "Alarm must be stopped with the physical touch sensor, or bedtime music is disabled"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "do": {
+                    "type": "string",
+                    "enum": [
+                      "clock",
+                      "clear",
+                      "stop",
+                      "play-music",
+                      "play-story"
+                    ]
+                  },
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "do"
+                ]
+              }
+            }
+          }
+        },
+        "description": "Supported actions include clock, clear, stop, play-music, and play-story."
+      }
+    },
+    "/api/v1/display/preview": {
+      "get": {
+        "summary": "Read packed OLED framebuffer",
+        "tags": [
+          "Display"
+        ],
+        "responses": {
+          "200": {
+            "description": "Packed 4-bit 256x64 OLED framebuffer",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/display/brightness-preview": {
+      "post": {
+        "summary": "Temporarily preview brightness",
+        "tags": [
+          "Display"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "brightness_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "hold_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30
+                  }
+                },
+                "required": [
+                  "brightness_percent"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/display/message": {
+      "post": {
+        "summary": "Send or schedule a text, image, or combined message",
+        "tags": [
+          "Display"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "image_file": {
+                    "type": "string",
+                    "description": "Raw image filename. Leave empty to select a random image from the chosen library."
+                  },
+                  "message_text": {
+                    "type": "string",
+                    "description": "Optional message text. Leave empty for an image-only message."
+                  },
+                  "delay_seconds": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      10,
+                      30,
+                      60
+                    ]
+                  },
+                  "scheduled_at": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 0,
+                    "description": "Unix time for a specific delivery time. Must be within 30 days and cannot be combined with a non-zero delay_seconds."
+                  },
+                  "image_bedtime": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "Use 1 to choose from Bedtime Images and 0 to choose from Day Images."
+                  },
+                  "notification_sound": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "Use 1 to play the built-in short chime when the message appears."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/alarms": {
+      "post": {
+        "summary": "Configure one alarm slot",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 7
+                  },
+                  "enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "time": {
+                    "type": "string",
+                    "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+                  },
+                  "music_file": {
+                    "type": "string"
+                  },
+                  "start_volume": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "end_volume": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "day0": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day1": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day2": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day3": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day4": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day5": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day6": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "time"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/audio": {
+      "post": {
+        "summary": "Configure audio",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "global_volume": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "show_song_metadata": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "story_enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "story_volume": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "story_message": {
+                    "type": "string",
+                    "maxLength": 63,
+                    "default": "STORY MODE!"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Story Mode accepts story_enabled, story_volume, and story_message."
+      }
+    },
+    "/api/v1/config/personalization": {
+      "post": {
+        "summary": "Set clock name",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "clock_name": {
+                    "type": "string",
+                    "maxLength": 63
+                  }
+                },
+                "required": [
+                  "clock_name"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/display": {
+      "post": {
+        "summary": "Configure clock display",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "oled_font": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3
+                  },
+                  "oled_font_file": {
+                    "type": "string"
+                  },
+                  "oled_font_size": {
+                    "type": "integer",
+                    "minimum": 18,
+                    "maximum": 54
+                  },
+                  "clock_24h_mode": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "oled_color": {
+                    "type": "string",
+                    "enum": [
+                      "yellow",
+                      "green",
+                      "white"
+                    ]
+                  },
+                  "bedtime_enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "bedtime_dim_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "bedtime_start": {
+                    "type": "string",
+                    "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+                  },
+                  "bedtime_end": {
+                    "type": "string",
+                    "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+                  },
+                  "bedtime_music_enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "Allow manual touch and browser music during bedtime"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "summary": "Read event log",
+        "tags": [
+          "Logs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logs/clear": {
+      "post": {
+        "summary": "Clear event log",
+        "tags": [
+          "Logs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/display/message/preview": {
+      "post": {
+        "summary": "Render an exact message draft framebuffer without changing the OLED",
+        "tags": [
+          "Display"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "image_file": {
+                    "type": "string"
+                  },
+                  "image_bedtime": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "message_text": {
+                    "type": "string",
+                    "maxLength": 180
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Packed 4-bit 256x64 OLED framebuffer rendered by the core",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "422": {
+            "description": "Message does not fit the OLED"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/images/download": {
+      "get": {
+        "summary": "Download all day source PNG images",
+        "responses": {
+          "200": {
+            "description": "ZIP archive containing only source PNG files",
+            "content": {
+              "application/zip": {}
+            }
+          },
+          "404": {
+            "description": "No source PNG files are available"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/bedtime-images/download": {
+      "get": {
+        "summary": "Download all bedtime source PNG images",
+        "responses": {
+          "200": {
+            "description": "ZIP archive containing only source PNG files",
+            "content": {
+              "application/zip": {}
+            }
+          },
+          "404": {
+            "description": "No source PNG files are available"
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics": {
+      "get": {
+        "summary": "Read network, platform, device identity, operating-system, storage, SD-card, service, and alarm diagnostics",
+        "responses": {
+          "200": {
+            "description": "Diagnostic status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "product_version": {
+                      "type": "string"
+                    },
+                    "api_version": {
+                      "type": "string"
+                    },
+                    "compiled_at": {
+                      "type": "string"
+                    },
+                    "hostname": {
+                      "type": "string"
+                    },
+                    "interface": {
+                      "type": "string"
+                    },
+                    "ip_address": {
+                      "type": "string"
+                    },
+                    "ssid": {
+                      "type": "string"
+                    },
+                    "wifi_signal_percent": {
+                      "type": "integer"
+                    },
+                    "wifi_signal_dbm": {
+                      "type": "integer"
+                    },
+                    "wifi_signal_available": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "ntp_synchronized": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "system_time_valid": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "cpu_temperature_c": {
+                      "type": "number"
+                    },
+                    "storage_free_bytes": {
+                      "type": "integer"
+                    },
+                    "storage_used_bytes": {
+                      "type": "integer"
+                    },
+                    "storage_total_bytes": {
+                      "type": "integer"
+                    },
+                    "day_images_bytes": {
+                      "type": "integer"
+                    },
+                    "bedtime_images_bytes": {
+                      "type": "integer"
+                    },
+                    "music_bytes": {
+                      "type": "integer"
+                    },
+                    "fonts_bytes": {
+                      "type": "integer"
+                    },
+                    "day_images_files": {
+                      "type": "integer"
+                    },
+                    "bedtime_images_files": {
+                      "type": "integer"
+                    },
+                    "music_files": {
+                      "type": "integer"
+                    },
+                    "fonts_files": {
+                      "type": "integer"
+                    },
+                    "api_healthy": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "core_healthy": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "oled_ok": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "touch_ok": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "last_successful_alarm": {
+                      "type": "integer"
+                    },
+                    "next_alarm_text": {
+                      "type": "string"
+                    },
+                    "os_pretty_name": {
+                      "type": "string"
+                    },
+                    "os_version_id": {
+                      "type": "string"
+                    },
+                    "os_codename": {
+                      "type": "string"
+                    },
+                    "kernel_release": {
+                      "type": "string"
+                    },
+                    "architecture": {
+                      "type": "string"
+                    },
+                    "hardware_model": {
+                      "type": "string"
+                    },
+                    "pi_serial": {
+                      "type": "string"
+                    },
+                    "board_revision": {
+                      "type": "string"
+                    },
+                    "machine_id": {
+                      "type": "string"
+                    },
+                    "inventory_id": {
+                      "type": "string"
+                    },
+                    "cpu_signature": {
+                      "type": "string"
+                    },
+                    "uptime_seconds": {
+                      "type": "integer"
+                    },
+                    "root_device": {
+                      "type": "string"
+                    },
+                    "root_disk": {
+                      "type": "string"
+                    },
+                    "root_filesystem": {
+                      "type": "string"
+                    },
+                    "root_read_only": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "boot_device": {
+                      "type": "string"
+                    },
+                    "boot_filesystem": {
+                      "type": "string"
+                    },
+                    "boot_mount_point": {
+                      "type": "string"
+                    },
+                    "sd_present": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "sd_device": {
+                      "type": "string"
+                    },
+                    "sd_type": {
+                      "type": "string"
+                    },
+                    "sd_name": {
+                      "type": "string"
+                    },
+                    "sd_manufacturer_id": {
+                      "type": "string"
+                    },
+                    "sd_oem_id": {
+                      "type": "string"
+                    },
+                    "sd_serial": {
+                      "type": "string"
+                    },
+                    "sd_manufacture_date": {
+                      "type": "string"
+                    },
+                    "sd_capacity_bytes": {
+                      "type": "integer"
+                    },
+                    "sd_cid": {
+                      "type": "string"
+                    },
+                    "led_ok": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "led_enabled": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "led_max_brightness": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "led_red_gain": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "led_green_gain": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "led_blue_gain": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "led_idle_off": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "led_bedtime_fade_minutes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 120
+                    },
+                    "led_pwm_hz": {
+                      "type": "integer"
+                    },
+                    "led_pwm_levels": {
+                      "type": "integer"
+                    },
+                    "led_write_errors": {
+                      "type": "integer"
+                    },
+                    "led_scene": {
+                      "type": "string"
+                    },
+                    "led_colour": {
+                      "type": "string",
+                      "pattern": "^#[0-9A-Fa-f]{6}$"
+                    },
+                    "led_output": {
+                      "type": "string",
+                      "pattern": "^#[0-9A-Fa-f]{6}$"
+                    },
+                    "led_common_cathode": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "led_gpio_red": {
+                      "type": "integer"
+                    },
+                    "led_gpio_green": {
+                      "type": "integer"
+                    },
+                    "led_gpio_blue": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/report": {
+      "get": {
+        "summary": "Download a text diagnostic report",
+        "responses": {
+          "200": {
+            "description": "Diagnostic report"
+          }
+        }
+      }
+    },
+    "/api/v1/backup/download": {
+      "get": {
+        "summary": "Download settings and user assets as a ZIP backup",
+        "responses": {
+          "200": {
+            "description": "Backup ZIP"
+          }
+        }
+      }
+    },
+    "/api/v1/backup/restore": {
+      "post": {
+        "summary": "Restore a mk-piclock backup ZIP",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "backup": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                },
+                "required": [
+                  "backup"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backup restored"
+          },
+          "400": {
+            "description": "Invalid backup"
+          },
+          "409": {
+            "description": "Music processing is active"
+          }
+        }
+      }
+    },
+    "/api/v1/factory-reset": {
+      "post": {
+        "summary": "Reset settings and remove user-added assets",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "confirm": {
+                    "type": "string",
+                    "enum": [
+                      "RESET"
+                    ]
+                  }
+                },
+                "required": [
+                  "confirm"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Factory reset completed"
+          },
+          "409": {
+            "description": "Alarm or music processing is active"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/stories": {
+      "get": {
+        "summary": "List stories and Story Mode settings",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "story_enabled": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "story_volume": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "story_message": {
+                      "type": "string",
+                      "maxLength": 63
+                    },
+                    "current": {
+                      "type": "string"
+                    },
+                    "tracks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "file": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "artist": {
+                            "type": "string"
+                          },
+                          "display": {
+                            "type": "string"
+                          },
+                          "id3": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "album": {
+                            "type": "string"
+                          },
+                          "year": {
+                            "type": "string"
+                          },
+                          "track": {
+                            "type": "string"
+                          },
+                          "genre": {
+                            "type": "string"
+                          },
+                          "duration_seconds": {
+                            "type": "number",
+                            "format": "double"
+                          },
+                          "duration_estimated": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "bitrate_kbps": {
+                            "type": "integer"
+                          },
+                          "bitrate_mode": {
+                            "type": "string",
+                            "enum": [
+                              "CBR",
+                              "VBR",
+                              "ABR"
+                            ]
+                          },
+                          "sample_rate_hz": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "channels": {
+                            "type": "integer"
+                          },
+                          "mpeg_layer": {
+                            "type": "integer"
+                          },
+                          "file_size_bytes": {
+                            "type": "integer",
+                            "format": "int64"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/stories/upload": {
+      "post": {
+        "summary": "Upload one validated story MP3",
+        "tags": [
+          "Assets"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "contentEncoding": "binary"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Story saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "uploaded": {
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing, oversized, or unreadable MP3"
+          },
+          "500": {
+            "description": "Story could not be saved"
+          },
+          "503": {
+            "description": "Story saved, but the clock core could not be notified"
+          },
+          "507": {
+            "description": "Story quota or available storage would be exceeded"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/stories/delete": {
+      "post": {
+        "summary": "Delete one story MP3",
+        "tags": [
+          "Assets"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filename"
+          },
+          "500": {
+            "description": "File could not be deleted"
+          },
+          "503": {
+            "description": "Deleted, but the clock core could not be notified"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/stories/delete-all": {
+      "post": {
+        "summary": "Delete all stories",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/led": {
+      "post": {
+        "summary": "Save one RGB LED activity profile",
+        "tags": [
+          "Lighting",
+          "Configuration"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scene": {
+                    "type": "string",
+                    "enum": [
+                      "alarm",
+                      "bedtime",
+                      "message",
+                      "music",
+                      "daytime",
+                      "stories"
+                    ]
+                  },
+                  "effect": {
+                    "type": "string",
+                    "enum": [
+                      "solid",
+                      "fade",
+                      "rainbow"
+                    ]
+                  },
+                  "brightness": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "cycle_seconds": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 60,
+                    "default": 8,
+                    "description": "Full fade or rainbow cycle duration."
+                  },
+                  "color1": {
+                    "type": "string",
+                    "pattern": "^#[0-9A-Fa-f]{6}$"
+                  },
+                  "color2": {
+                    "type": "string",
+                    "pattern": "^#[0-9A-Fa-f]{6}$"
+                  }
+                },
+                "required": [
+                  "scene",
+                  "effect",
+                  "brightness",
+                  "cycle_seconds",
+                  "color1",
+                  "color2"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid lighting settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/led/preview": {
+      "post": {
+        "summary": "Temporarily preview RGB LED settings",
+        "tags": [
+          "Lighting"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scene": {
+                    "type": "string",
+                    "enum": [
+                      "alarm",
+                      "bedtime",
+                      "message",
+                      "music",
+                      "daytime",
+                      "stories"
+                    ]
+                  },
+                  "effect": {
+                    "type": "string",
+                    "enum": [
+                      "solid",
+                      "fade",
+                      "rainbow"
+                    ]
+                  },
+                  "brightness": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "cycle_seconds": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": 60,
+                    "default": 8,
+                    "description": "Full fade or rainbow cycle duration."
+                  },
+                  "color1": {
+                    "type": "string",
+                    "pattern": "^#[0-9A-Fa-f]{6}$"
+                  },
+                  "color2": {
+                    "type": "string",
+                    "pattern": "^#[0-9A-Fa-f]{6}$"
+                  },
+                  "hold_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30,
+                    "default": 10
+                  },
+                  "bypass_master": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "default": 0,
+                    "description": "Temporarily enable the LED for previews or wiring tests even when the master switch is off."
+                  },
+                  "raw_output": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "default": 0,
+                    "description": "Bypass brightness limits and channel calibration for a direct wiring test."
+                  }
+                },
+                "required": [
+                  "scene",
+                  "effect",
+                  "brightness",
+                  "cycle_seconds",
+                  "color1",
+                  "color2"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid lighting settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/led-global": {
+      "post": {
+        "summary": "Save global RGB lighting controls and calibration",
+        "tags": [
+          "Lighting",
+          "Configuration"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "max_brightness": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "red_gain": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "green_gain": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "blue_gain": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "idle_off": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "bedtime_fade_minutes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 120
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "max_brightness",
+                  "red_gain",
+                  "green_gain",
+                  "blue_gain",
+                  "idle_off",
+                  "bedtime_fade_minutes"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid global lighting settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

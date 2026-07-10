@@ -1,0 +1,39 @@
+.lighting-module .page-intro { margin: 0 0 10px; color: var(--muted); }
+.lighting-current { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.lighting-live-swatch, .lighting-swatch {
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(0,0,0,.32);
+    border-radius: 50%;
+    background: #000;
+    box-shadow: inset 0 0 0 2px rgba(255,255,255,.3);
+}
+.lighting-grid { display: grid; gap: 10px; margin-top: 10px; }
+.lighting-card, .lighting-global-card { display: grid; gap: 10px; }
+.lighting-card .card-title-row, .lighting-global-card .card-title-row { margin-bottom: 0; }
+.lighting-summary { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.lighting-fields, .lighting-global-grid, .lighting-calibration-grid { display: grid; gap: 10px; }
+.lighting-colours { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lighting-toggle-grid { display: grid; gap: 8px; }
+.lighting-card input[type="color"] { min-height: 46px; padding: 4px; cursor: pointer; }
+.lighting-card input[type="range"], .lighting-global-card input[type="range"] { min-height: 28px; margin-bottom: 0; padding: 0; cursor: pointer; accent-color: var(--main); }
+.lighting-card output, .lighting-global-card output { float: right; color: var(--main); font-size: 14px; font-weight: 900; }
+.lighting-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lighting-profile-actions { grid-template-columns: repeat(3, 1fr); }
+.lighting-test-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.lighting-effect-note { margin: -4px 0 0; }
+.check-row { display: flex; align-items: center; gap: 8px; }
+.check-row input { width: auto; }
+@media (min-width: 760px) {
+    .lighting-grid { grid-template-columns: 1fr 1fr; }
+    .lighting-global-grid { grid-template-columns: 1fr 1fr; }
+    .lighting-calibration-grid { grid-template-columns: repeat(3, 1fr); }
+    .lighting-toggle-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 560px) {
+    .lighting-test-row, .lighting-profile-actions { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 430px) {
+    .lighting-colours, .lighting-actions, .lighting-test-row, .lighting-profile-actions { grid-template-columns: 1fr; }
+}

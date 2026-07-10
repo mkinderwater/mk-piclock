@@ -8,7 +8,7 @@
     - libgpiod GPIO for OLED DC/RST and TTP223B touch input
     - Private Unix socket control service for mk-piclock-api
     - MP3 playback using libmpg123 + ALSA PCM
-    - Alarms, fonts, faces, messages, bedtime dimming, touch input, and config
+    - Alarms, fonts, images, messages, bedtime dimming, touch input, and config
 
   Build both services with the supplied Makefile.
 */
@@ -19,6 +19,9 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <linux/wireless.h>
 #include <linux/spi/spidev.h>
 #include <poll.h>
 #include <pwd.h>
@@ -45,6 +48,7 @@
 #include <gpiod.h>
 
 #include "ipc_protocol.h"
+#include "led_control.h"
 #include "asset_format.h"
 #include "util.h"
 
@@ -52,13 +56,25 @@
 #define write_all mp_write_full
 
 #define APP_NAME "mk-piclock-core"
-#define APP_VERSION "1.6.10"
+#define APP_VERSION "1.7.6"
+
+#define LED_PROFILE(fx, level, seconds, r1, g1, b1, r2, g2, b2) \
+    { .effect = (fx), .brightness = (level), .cycle_seconds = (seconds), .reserved = 0, \
+      .red1 = (r1), .green1 = (g1), .blue1 = (b1), \
+      .red2 = (r2), .green2 = (g2), .blue2 = (b2) }
 #define DEFAULT_CLOCK_NAME "Rylie"
 #define STARTUP_GREETING_SECONDS 3
 #define APP_ROOT "/opt/mk-piclock"
-#define FACE_DIR APP_ROOT "/assets/faces"
-#define BEDTIME_FACE_DIR APP_ROOT "/assets/bedtime-faces"
+#define IMAGE_DIR APP_ROOT "/assets/images"
+#define BEDTIME_IMAGE_DIR APP_ROOT "/assets/bedtime-images"
 #define MUSIC_DIR APP_ROOT "/assets/music"
+#define STORY_DIR APP_ROOT "/assets/stories"
+#define DEFAULT_ALARM_PATH APP_ROOT "/assets/default-alarm.mp3"
+#define DEFAULT_ALARM_LABEL "Built-in Alarm"
+#define MESSAGE_CHIME_PATH APP_ROOT "/assets/message-chime.mp3"
+#define MESSAGE_CHIME_LABEL "Message Chime"
+#define MESSAGE_CHIME_VOLUME_MAX 55
+#define ALARM_MAX_DURATION_SECONDS 1800
 #define FONT_DIR APP_ROOT "/assets/fonts"
 #define CONFIG_DIR APP_ROOT "/config"
 #define CONFIG_FILE CONFIG_DIR "/clock.conf"
@@ -95,24 +111,33 @@
 #define TOUCH_POLL_MS 20u
 #define TOUCH_DEBOUNCE_MS 50u
 #define TOUCH_LONG_PRESS_MS 3000u
+#define TOUCH_DIAGNOSTIC_PRESS_MS 8000u
+#define DIAGNOSTIC_SCREEN_SECONDS 30u
+#define DIAGNOSTIC_REFRESH_MS 2000u
+#define STORY_PRESS_COUNT 10
+#define STORY_PRESS_WINDOW_MS 8000u
+#define STORY_MESSAGE_MAX 64
+#define STORY_COLLAGE_MAX_IMAGES 5
+#define STORY_COLLAGE_IMAGE_SIZE 48
+#define STORY_INTRO_SECONDS 3u
+#define STORY_TITLE_SECONDS 4u
 
-#define FACE_COUNT 64
 #define MAX_ALARMS 7
 #define MUSIC_FILE_MAX 256
-#define FACE_FILE_MAX 128
-#define CLOCK_FACE_CHANGE_MAX_SECONDS 300
-#define BEDTIME_FACE_CHANGE_SECONDS 300
+#define IMAGE_FILE_MAX 128
+#define CLOCK_IMAGE_CHANGE_MAX_SECONDS 300
+#define BEDTIME_IMAGE_CHANGE_SECONDS 300
 #define CLOCK_TIME_Y_OFFSET -7
-#define CLOCK_FACE_Y_NUDGE -2
+#define CLOCK_IMAGE_Y_NUDGE -2
 #define CLOCK_SIDE_WIDGET_SIZE 54
 #define CLOCK_SIDE_WIDGET_X 4
-#define CLOCK_FACE_PREVIEW_SECONDS 15
 #define CLOCK_STATUS_PILL_H 11
 #define SONG_METADATA_X 74
 #define SONG_METADATA_W (OLED_W - SONG_METADATA_X - 2)
 #define SONG_METADATA_TEXT_MAX (MP_ID3_TEXT_MAX * 2 + 4)
-#define SONG_SCROLL_PAUSE_MS 1250u
 #define SONG_SCROLL_SPEED_PX_PER_SEC 18u
+#define SONG_SCROLL_GAP_PX 24
+#define SONG_SCROLL_FRAME_US 75000u
 
 
 #define CORE_RUNTIME_DIR "/run/mk-piclock"
@@ -124,21 +149,30 @@ static volatile sig_atomic_t g_running = 1;
 static time_t g_start_time = 0;
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static char g_clock_face_cached[FACE_FILE_MAX] = "";
-static time_t g_clock_face_next_change = 0;
-static char g_bedtime_face_cached[FACE_FILE_MAX] = "";
-static time_t g_bedtime_face_next_change = 0;
+struct rotating_image_state {
+    char file[IMAGE_FILE_MAX];
+    time_t next_change;
+};
 
-struct face_raw_cache {
-    char file[FACE_FILE_MAX];
+static struct rotating_image_state g_rotating_images[2];
+
+struct story_collage_state {
+    char files[STORY_COLLAGE_MAX_IMAGES][IMAGE_FILE_MAX];
+    int count;
+};
+
+static struct story_collage_state g_story_collage;
+
+struct image_raw_cache {
+    char file[IMAGE_FILE_MAX];
     int bedtime;
-    uint8_t raw[MP_FACE_RAW_BYTES];
+    uint8_t raw[MP_IMAGE_RAW_BYTES];
     int valid;
     unsigned long generation;
 };
 
-static pthread_mutex_t g_face_raw_cache_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct face_raw_cache g_face_raw_cache = { .file = "", .bedtime = 0, .valid = 0, .generation = 0 };
+static pthread_mutex_t g_image_raw_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct image_raw_cache g_image_raw_cache = { .file = "", .bedtime = 0, .valid = 0, .generation = 0 };
 
 struct alarm_slot {
     int enabled;
@@ -152,35 +186,38 @@ struct alarm_slot {
 };
 
 struct app_state {
-    int display_mode;       /* 0 clock, 1 clear, 2 face, 3 message */
+    int display_mode;       /* 0 clock, 1 clear, 2 message, 3 diagnostics */
     int display_dirty;      /* set by API IPC thread; drawn by main OLED loop */
-    int current_face;       /* legacy numeric face */
-    int message_face;       /* legacy numeric face */
-    char current_face_file[FACE_FILE_MAX];
-    char preview_face_file[FACE_FILE_MAX];
-    int preview_face_bedtime;
-    time_t preview_face_until;
-    char message_face_file[FACE_FILE_MAX];
+    int diagnostic_return_mode;
+    time_t diagnostic_until;
+    char message_image_file[IMAGE_FILE_MAX];
+    int message_image_bedtime;
     time_t message_until;   /* unix time; 0 = no active message */
     char message_text[192];
-    int pending_message_face;
-    char pending_message_face_file[FACE_FILE_MAX];
+    char pending_message_image_file[IMAGE_FILE_MAX];
+    int pending_message_image_bedtime;
+    int pending_message_notification_sound;
     char pending_message_text[192];
     time_t pending_message_at;
-    int alarm_enabled;      /* legacy compatibility, mirrors alarm 1 */
-    int alarm_hour;         /* legacy compatibility, mirrors alarm 1 */
-    int alarm_min;          /* legacy compatibility, mirrors alarm 1 */
-    int alarm_fired_yday;   /* legacy compatibility */
     int global_volume;
+    int story_mode_enabled;
+    int story_volume;
+    char story_message[STORY_MESSAGE_MAX];
+    int story_playing;
+    uint64_t story_intro_until_ms;
+    uint64_t story_title_until_ms;
     int bedtime_enabled;
     int bedtime_start_hour;
     int bedtime_start_min;
     int bedtime_end_hour;
     int bedtime_end_min;
     int bedtime_dim_percent;
+    int bedtime_music_enabled;
     int oled_contrast_current;
     int oled_master_current;
     int oled_brightness_current;
+    int brightness_preview_percent;
+    time_t brightness_preview_until;
     int audio_playing;
     char audio_file[MUSIC_FILE_MAX];
     char audio_title[MP_ID3_TEXT_MAX];
@@ -190,46 +227,59 @@ struct app_state {
     int show_song_metadata;
     int alarm_active;             /* 1 only while an alarm MP3 is currently playing */
     int alarm_volume_percent;     /* current alarm ramp volume, 0..100 */
+    long long last_successful_alarm;
     struct alarm_slot alarms[MAX_ALARMS];
+    struct mp_led_profile led_profiles[MP_LED_SCENE_COUNT];
+    struct mp_led_global_settings led_settings;
+    int led_bedtime_fade_active;
+    int led_preview_scene;
+    time_t led_preview_until;
+    int led_preview_bypass_master;
+    int led_preview_raw_output;
+    struct mp_led_profile led_preview_profile;
     int oled_ok;
     char clock_name[64];
     int oled_font;         /* 0 seven, 1 seven thin, 2 pixel, 3 pixel bold */
     char oled_font_file[128]; /* uploaded .ttf/.otf filename, empty = built-in */
     int oled_font_size;    /* TrueType pixel size */
     int clock_24h_mode;    /* 0 = 12-hour, 1 = 24-hour */
+    int oled_color;        /* GUI panel colour: yellow, green, or white */
     pthread_mutex_t lock;
 };
 
 static struct app_state g_state = {
     .display_mode = 0,
     .display_dirty = 1,
-    .current_face = 1,
-    .message_face = 1,
-    .current_face_file = "",
-    .preview_face_file = "",
-    .preview_face_bedtime = 0,
-    .preview_face_until = 0,
-    .message_face_file = "",
+    .diagnostic_return_mode = 0,
+    .diagnostic_until = 0,
+    .message_image_file = "",
+    .message_image_bedtime = 0,
     .message_until = 0,
     .message_text = "",
-    .pending_message_face = 1,
-    .pending_message_face_file = "",
+    .pending_message_image_file = "",
+    .pending_message_image_bedtime = 0,
+    .pending_message_notification_sound = 0,
     .pending_message_text = "",
     .pending_message_at = 0,
-    .alarm_enabled = 0,
-    .alarm_hour = 7,
-    .alarm_min = 0,
-    .alarm_fired_yday = -1,
     .global_volume = 80,
+    .story_mode_enabled = 0,
+    .story_volume = 55,
+    .story_message = "STORY MODE!",
+    .story_playing = 0,
+    .story_intro_until_ms = 0,
+    .story_title_until_ms = 0,
     .bedtime_enabled = 0,
     .bedtime_start_hour = 21,
     .bedtime_start_min = 0,
     .bedtime_end_hour = 7,
     .bedtime_end_min = 0,
     .bedtime_dim_percent = 35,
+    .bedtime_music_enabled = 1,
     .oled_contrast_current = -1,
     .oled_master_current = -1,
     .oled_brightness_current = -1,
+    .brightness_preview_percent = -1,
+    .brightness_preview_until = 0,
     .audio_playing = 0,
     .audio_file = "",
     .audio_title = "",
@@ -239,12 +289,30 @@ static struct app_state g_state = {
     .show_song_metadata = 1,
     .alarm_active = 0,
     .alarm_volume_percent = 0,
+    .last_successful_alarm = 0,
+    .led_profiles = {
+        [MP_LED_SCENE_ALARM] = LED_PROFILE(MP_LED_EFFECT_FADE, 70, 8, 255, 0, 0, 255, 160, 0),
+        [MP_LED_SCENE_BEDTIME] = LED_PROFILE(MP_LED_EFFECT_SOLID, 3, 8, 255, 48, 0, 255, 48, 0),
+        [MP_LED_SCENE_MESSAGE] = LED_PROFILE(MP_LED_EFFECT_FADE, 35, 8, 0, 150, 255, 255, 255, 255),
+        [MP_LED_SCENE_MUSIC] = LED_PROFILE(MP_LED_EFFECT_RAINBOW, 40, 12, 255, 0, 0, 0, 0, 255),
+        [MP_LED_SCENE_DAYTIME] = LED_PROFILE(MP_LED_EFFECT_SOLID, 5, 8, 255, 220, 160, 255, 220, 160),
+        [MP_LED_SCENE_STORIES] = LED_PROFILE(MP_LED_EFFECT_FADE, 15, 8, 125, 45, 255, 0, 90, 255),
+        [MP_LED_SCENE_TOUCH] = LED_PROFILE(MP_LED_EFFECT_FADE, 60, 2, 255, 255, 255, 0, 0, 0)
+    },
+    .led_settings = {1, 100, 100, 65, 80, 0, 15, 1, 60, 255, 255, 255},
+    .led_bedtime_fade_active = 0,
+    .led_preview_scene = -1,
+    .led_preview_until = 0,
+    .led_preview_bypass_master = 0,
+    .led_preview_raw_output = 0,
+    .led_preview_profile = {0},
     .oled_ok = 0,
     .clock_name = DEFAULT_CLOCK_NAME,
     .oled_font = 0,
     .oled_font_file = "",
     .oled_font_size = 48,
     .clock_24h_mode = 0,
+    .oled_color = MP_OLED_COLOR_GREEN,
     .lock = PTHREAD_MUTEX_INITIALIZER
 };
 
@@ -269,6 +337,10 @@ struct audio_player_state {
     pthread_cond_t stopped;
     int running;
     int stop_requested;
+    int alarm_mode;
+    int notification_mode;
+    int timed_out;
+    uint64_t alarm_deadline_ms;
     char file[MUSIC_FILE_MAX];
 };
 
@@ -277,6 +349,10 @@ static struct audio_player_state g_audio = {
     .stopped = PTHREAD_COND_INITIALIZER,
     .running = 0,
     .stop_requested = 0,
+    .alarm_mode = 0,
+    .notification_mode = 0,
+    .timed_out = 0,
+    .alarm_deadline_ms = 0,
     .file = ""
 };
 
@@ -287,6 +363,8 @@ struct oled_dev {
     struct gpiod_line_request *gpio_req;
     uint8_t fb[OLED_FB_BYTES];
     uint8_t prev_fb[OLED_FB_BYTES];
+    uint8_t preview_fb[OLED_FB_BYTES];
+    pthread_mutex_t preview_lock;
     int prev_valid;
 };
 
@@ -294,8 +372,18 @@ static struct oled_dev g_oled = {
     .spi_fd = -1,
     .chip = NULL,
     .gpio_req = NULL,
+    .preview_lock = PTHREAD_MUTEX_INITIALIZER,
     .prev_valid = 0
 };
+
+/* Drawing normally targets the physical OLED framebuffer. The message editor
+ * can render into a thread-local scratch framebuffer so its browser preview is
+ * produced by the exact same renderer without changing the physical screen. */
+static _Thread_local uint8_t *g_oled_render_fb = NULL;
+
+static uint8_t *oled_draw_fb(void) {
+    return g_oled_render_fb ? g_oled_render_fb : g_oled.fb;
+}
 
 struct touch_dev {
     struct gpiod_chip *chip;
@@ -312,6 +400,8 @@ static struct touch_dev g_touch = {
     .ready = 0,
     .pressed = 0
 };
+
+static void touch_get_state(int *ready, int *pressed);
 
 static void on_signal(int sig) {
     (void)sig;
@@ -482,34 +572,28 @@ static void sanitize_clock_name(char *s) {
 }
 
 static int safe_asset_filename(const char *name);
+static void sanitize_message_text(char *s, size_t s_len);
 
-static int face_id_valid_int(int id) {
-    return id >= 1 && id <= FACE_COUNT;
-}
 
 static int has_raw_ext(const char *name) {
     const char *dot = strrchr(name ? name : "", '.');
     return dot && strcasecmp(dot, ".raw") == 0;
 }
 
-static int safe_face_filename(const char *name) {
+static int safe_image_filename(const char *name) {
     return safe_asset_filename(name) && has_raw_ext(name);
 }
 
-static int make_face_path_by_file(const char *file, char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-    if (!safe_face_filename(file)) return -1;
-    snprintf(out, out_len, FACE_DIR "/%s", file);
-    return 0;
+static const char *image_dir(int bedtime) {
+    return bedtime ? BEDTIME_IMAGE_DIR : IMAGE_DIR;
 }
 
-static int make_bedtime_face_path_by_file(const char *file, char *out, size_t out_len) {
+static int make_image_path_by_file(const char *file, int bedtime, char *out, size_t out_len) {
     if (!out || out_len == 0) return -1;
     out[0] = '\0';
-    if (!safe_face_filename(file)) return -1;
-    snprintf(out, out_len, BEDTIME_FACE_DIR "/%s", file);
-    return 0;
+    if (!safe_image_filename(file)) return -1;
+    int written = snprintf(out, out_len, "%s/%s", image_dir(bedtime), file);
+    return written > 0 && (size_t)written < out_len ? 0 : -1;
 }
 
 static int has_font_ext(const char *name) {
@@ -550,43 +634,34 @@ static void make_music_path(const char *file, char *out, size_t out_len) {
 
 
 enum asset_list_kind {
-    ASSET_LIST_FACE_RAW = 1,
+    ASSET_LIST_IMAGE_RAW = 1,
     ASSET_LIST_MUSIC_MP3 = 2
 };
 
-static void invalidate_face_raw_cache(void) {
-    pthread_mutex_lock(&g_face_raw_cache_lock);
-    g_face_raw_cache.valid = 0;
-    g_face_raw_cache.file[0] = '\0';
-    g_face_raw_cache.generation++;
-    pthread_mutex_unlock(&g_face_raw_cache_lock);
+static void invalidate_image_raw_cache(void) {
+    pthread_mutex_lock(&g_image_raw_cache_lock);
+    g_image_raw_cache.valid = 0;
+    g_image_raw_cache.file[0] = '\0';
+    g_image_raw_cache.generation++;
+    pthread_mutex_unlock(&g_image_raw_cache_lock);
 }
 
-static void invalidate_normal_face_assets(void) {
-    invalidate_face_raw_cache();
-    g_clock_face_cached[0] = '\0';
-    g_clock_face_next_change = 0;
+static void invalidate_image_assets(int bedtime) {
+    invalidate_image_raw_cache();
+    struct rotating_image_state *state = &g_rotating_images[bedtime ? 1 : 0];
+    state->file[0] = '\0';
+    state->next_change = 0;
 }
 
-static void invalidate_bedtime_face_assets(void) {
-    invalidate_face_raw_cache();
-    g_bedtime_face_cached[0] = '\0';
-    g_bedtime_face_next_change = 0;
-}
-
-static void invalidate_all_face_assets(void) {
-    invalidate_normal_face_assets();
-    invalidate_bedtime_face_assets();
-}
 
 static int asset_file_matches_kind(const char *dir, const char *name, int kind) {
     if (!dir || !name) return 0;
-    if (kind == ASSET_LIST_FACE_RAW) {
-        if (!safe_face_filename(name)) return 0;
+    if (kind == ASSET_LIST_IMAGE_RAW) {
+        if (!safe_image_filename(name)) return 0;
         char path[512];
         snprintf(path, sizeof(path), "%s/%s", dir, name);
         struct stat st;
-        return stat(path, &st) == 0 && st.st_size == MP_FACE_RAW_BYTES;
+        return stat(path, &st) == 0 && st.st_size == MP_IMAGE_RAW_BYTES;
     }
     return safe_asset_filename(name) && kind == ASSET_LIST_MUSIC_MP3 && has_mp3_ext(name);
 }
@@ -626,25 +701,84 @@ static void init_alarm_defaults(void) {
         g_state.alarms[i].fired_yday = -1;
         g_state.alarms[i].music_file[0] = '\0';
     }
-
-    g_state.alarm_enabled = g_state.alarms[0].enabled;
-    g_state.alarm_hour = g_state.alarms[0].hour;
-    g_state.alarm_min = g_state.alarms[0].min;
-    g_state.alarm_fired_yday = g_state.alarms[0].fired_yday;
 }
 
-static void sync_legacy_alarm_fields_locked(void) {
-    g_state.alarm_enabled = g_state.alarms[0].enabled;
-    g_state.alarm_hour = g_state.alarms[0].hour;
-    g_state.alarm_min = g_state.alarms[0].min;
-    g_state.alarm_fired_yday = g_state.alarms[0].fired_yday;
+
+static void reset_persistent_state_locked(void) {
+    g_state.display_mode = 0;
+    g_state.display_dirty = 1;
+    g_state.diagnostic_return_mode = 0;
+    g_state.diagnostic_until = 0;
+    g_state.message_image_file[0] = '\0';
+    g_state.message_image_bedtime = 0;
+    g_state.message_until = 0;
+    g_state.message_text[0] = '\0';
+    g_state.pending_message_image_file[0] = '\0';
+    g_state.pending_message_image_bedtime = 0;
+    g_state.pending_message_notification_sound = 0;
+    g_state.pending_message_text[0] = '\0';
+    g_state.pending_message_at = 0;
+    g_state.global_volume = 80;
+    g_state.story_mode_enabled = 0;
+    g_state.story_volume = 55;
+    safe_str(g_state.story_message, sizeof(g_state.story_message), "STORY MODE!");
+    g_state.story_playing = 0;
+    g_state.story_intro_until_ms = 0;
+    g_state.story_title_until_ms = 0;
+    g_state.bedtime_enabled = 0;
+    g_state.bedtime_start_hour = 21;
+    g_state.bedtime_start_min = 0;
+    g_state.bedtime_end_hour = 7;
+    g_state.bedtime_end_min = 0;
+    g_state.bedtime_dim_percent = 35;
+    g_state.bedtime_music_enabled = 1;
+    g_state.show_song_metadata = 1;
+    g_state.last_successful_alarm = 0;
+    safe_str(g_state.clock_name, sizeof(g_state.clock_name), DEFAULT_CLOCK_NAME);
+    g_state.oled_font = 0;
+    g_state.oled_font_file[0] = '\0';
+    g_state.oled_font_size = 48;
+    g_state.clock_24h_mode = 0;
+    g_state.oled_color = MP_OLED_COLOR_GREEN;
+    g_state.led_profiles[MP_LED_SCENE_ALARM] =
+        (struct mp_led_profile)LED_PROFILE(MP_LED_EFFECT_FADE, 70, 8, 255, 0, 0, 255, 160, 0);
+    g_state.led_profiles[MP_LED_SCENE_BEDTIME] =
+        (struct mp_led_profile)LED_PROFILE(MP_LED_EFFECT_SOLID, 3, 8, 255, 48, 0, 255, 48, 0);
+    g_state.led_profiles[MP_LED_SCENE_MESSAGE] =
+        (struct mp_led_profile)LED_PROFILE(MP_LED_EFFECT_FADE, 35, 8, 0, 150, 255, 255, 255, 255);
+    g_state.led_profiles[MP_LED_SCENE_MUSIC] =
+        (struct mp_led_profile)LED_PROFILE(MP_LED_EFFECT_RAINBOW, 40, 12, 255, 0, 0, 0, 0, 255);
+    g_state.led_profiles[MP_LED_SCENE_DAYTIME] =
+        (struct mp_led_profile)LED_PROFILE(MP_LED_EFFECT_SOLID, 5, 8, 255, 220, 160, 255, 220, 160);
+    g_state.led_profiles[MP_LED_SCENE_STORIES] =
+        (struct mp_led_profile)LED_PROFILE(MP_LED_EFFECT_FADE, 15, 8, 125, 45, 255, 0, 90, 255);
+    g_state.led_profiles[MP_LED_SCENE_TOUCH] =
+        (struct mp_led_profile)LED_PROFILE(MP_LED_EFFECT_FADE, 60, 2, 255, 255, 255, 0, 0, 0);
+    g_state.led_settings =
+        (struct mp_led_global_settings){1, 100, 100, 65, 80, 0, 15, 1, 60, 255, 255, 255};
+    g_state.led_bedtime_fade_active = 0;
+    g_state.led_preview_scene = -1;
+    g_state.led_preview_until = 0;
+    g_state.led_preview_bypass_master = 0;
+    g_state.led_preview_raw_output = 0;
+    memset(&g_state.led_preview_profile, 0, sizeof(g_state.led_preview_profile));
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        g_state.alarms[i].enabled = 0;
+        g_state.alarms[i].hour = 7;
+        g_state.alarms[i].min = 0;
+        g_state.alarms[i].weekdays = 0x7F;
+        g_state.alarms[i].start_volume = 20;
+        g_state.alarms[i].end_volume = 80;
+        g_state.alarms[i].fired_yday = -1;
+        g_state.alarms[i].music_file[0] = '\0';
+    }
 }
+
 
 #define CONFIG_INT_FIELDS(X) \
-    X("alarm_enabled", g_state.alarms[0].enabled, "%d") \
-    X("alarm_hour", g_state.alarms[0].hour, "%02d") \
-    X("alarm_min", g_state.alarms[0].min, "%02d") \
     X("global_volume", g_state.global_volume, "%d") \
+    X("story_mode_enabled", g_state.story_mode_enabled, "%d") \
+    X("story_volume", g_state.story_volume, "%d") \
     X("show_song_metadata", g_state.show_song_metadata, "%d") \
     X("bedtime_enabled", g_state.bedtime_enabled, "%d") \
     X("bedtime_start_hour", g_state.bedtime_start_hour, "%02d") \
@@ -652,12 +786,27 @@ static void sync_legacy_alarm_fields_locked(void) {
     X("bedtime_end_hour", g_state.bedtime_end_hour, "%02d") \
     X("bedtime_end_min", g_state.bedtime_end_min, "%02d") \
     X("bedtime_dim_percent", g_state.bedtime_dim_percent, "%d") \
+    X("bedtime_music_enabled", g_state.bedtime_music_enabled, "%d") \
     X("oled_font", g_state.oled_font, "%d") \
     X("oled_font_size", g_state.oled_font_size, "%d") \
-    X("clock_24h_mode", g_state.clock_24h_mode, "%d")
+    X("clock_24h_mode", g_state.clock_24h_mode, "%d") \
+    X("oled_color", g_state.oled_color, "%d") \
+    X("led_enabled", g_state.led_settings.enabled, "%d") \
+    X("led_max_brightness", g_state.led_settings.max_brightness, "%d") \
+    X("led_red_gain", g_state.led_settings.red_gain, "%d") \
+    X("led_green_gain", g_state.led_settings.green_gain, "%d") \
+    X("led_blue_gain", g_state.led_settings.blue_gain, "%d") \
+    X("led_idle_off", g_state.led_settings.idle_off, "%d") \
+    X("led_bedtime_fade_minutes", g_state.led_settings.bedtime_fade_minutes, "%d") \
+    X("led_touch_blink_enabled", g_state.led_settings.touch_blink_enabled, "%d") \
+    X("led_touch_blink_brightness", g_state.led_settings.touch_blink_brightness, "%d") \
+    X("led_touch_blink_red", g_state.led_settings.touch_blink_red, "%d") \
+    X("led_touch_blink_green", g_state.led_settings.touch_blink_green, "%d") \
+    X("led_touch_blink_blue", g_state.led_settings.touch_blink_blue, "%d")
 
 #define CONFIG_STRING_FIELDS(X) \
     X("clock_name", g_state.clock_name, sizeof(g_state.clock_name)) \
+    X("story_message", g_state.story_message, sizeof(g_state.story_message)) \
     X("oled_font_file", g_state.oled_font_file, sizeof(g_state.oled_font_file))
 
 #define CONFIG_ALARM_INT_FIELDS(X) \
@@ -675,6 +824,69 @@ static void sync_legacy_alarm_fields_locked(void) {
         X(i, "music_file", g_state.alarms[i].music_file, sizeof(g_state.alarms[i].music_file)) \
     }
 
+static const char *led_scene_config_key(enum mp_led_scene scene) {
+    switch (scene) {
+        case MP_LED_SCENE_ALARM: return "alarm";
+        case MP_LED_SCENE_BEDTIME: return "bedtime";
+        case MP_LED_SCENE_MESSAGE: return "message";
+        case MP_LED_SCENE_MUSIC: return "music";
+        case MP_LED_SCENE_DAYTIME: return "daytime";
+        case MP_LED_SCENE_STORIES: return "stories";
+        case MP_LED_SCENE_TOUCH: return "touch";
+        default: return "daytime";
+    }
+}
+
+static void sanitize_led_profile(struct mp_led_profile *profile) {
+    if (!profile) return;
+    if (profile->effect > MP_LED_EFFECT_RAINBOW) profile->effect = MP_LED_EFFECT_SOLID;
+    if (profile->brightness > 100) profile->brightness = 100;
+    if (profile->cycle_seconds < 2) profile->cycle_seconds =
+        profile->effect == MP_LED_EFFECT_RAINBOW ? 12 : 8;
+    if (profile->cycle_seconds > 60) profile->cycle_seconds = 60;
+    profile->reserved = 0;
+}
+
+static void sanitize_led_settings(struct mp_led_global_settings *settings) {
+    if (!settings) return;
+    settings->enabled = settings->enabled ? 1 : 0;
+    if (settings->max_brightness > 100) settings->max_brightness = 100;
+    if (settings->red_gain > 100) settings->red_gain = 100;
+    if (settings->green_gain > 100) settings->green_gain = 100;
+    if (settings->blue_gain > 100) settings->blue_gain = 100;
+    settings->idle_off = settings->idle_off ? 1 : 0;
+    if (settings->bedtime_fade_minutes > 120) settings->bedtime_fade_minutes = 120;
+    settings->touch_blink_enabled = settings->touch_blink_enabled ? 1 : 0;
+    if (settings->touch_blink_brightness > 100) settings->touch_blink_brightness = 100;
+}
+
+static int load_led_config_value(const char *key, const char *val) {
+    char expected[96];
+    for (int i = 0; i < MP_LED_SCENE_COUNT; i++) {
+        struct mp_led_profile *profile = &g_state.led_profiles[i];
+        const char *name = led_scene_config_key((enum mp_led_scene)i);
+#define MATCH_LED_FIELD(suffix, target, maximum) \
+        do { \
+            snprintf(expected, sizeof(expected), "led_%s_%s", name, suffix); \
+            if (strcmp(key, expected) == 0) { \
+                target = (uint8_t)clamp_int(atoi(val), 0, maximum); \
+                return 1; \
+            } \
+        } while (0)
+        MATCH_LED_FIELD("effect", profile->effect, MP_LED_EFFECT_RAINBOW);
+        MATCH_LED_FIELD("brightness", profile->brightness, 100);
+        MATCH_LED_FIELD("cycle_seconds", profile->cycle_seconds, 60);
+        MATCH_LED_FIELD("red1", profile->red1, 255);
+        MATCH_LED_FIELD("green1", profile->green1, 255);
+        MATCH_LED_FIELD("blue1", profile->blue1, 255);
+        MATCH_LED_FIELD("red2", profile->red2, 255);
+        MATCH_LED_FIELD("green2", profile->green2, 255);
+        MATCH_LED_FIELD("blue2", profile->blue2, 255);
+#undef MATCH_LED_FIELD
+    }
+    return 0;
+}
+
 static void save_config(void) {
     ensure_dir(CONFIG_DIR);
 
@@ -685,7 +897,6 @@ static void save_config(void) {
     if (!f) return;
 
     pthread_mutex_lock(&g_state.lock);
-    sync_legacy_alarm_fields_locked();
 #define SAVE_CONFIG_INT(cfg_key, field, fmt) fprintf(f, cfg_key "=" fmt "\n", field);
     CONFIG_INT_FIELDS(SAVE_CONFIG_INT)
 #undef SAVE_CONFIG_INT
@@ -709,6 +920,33 @@ static void save_config(void) {
     } while (0);
     CONFIG_STRING_FIELDS(SAVE_CONFIG_STRING)
 #undef SAVE_CONFIG_STRING
+    for (int i = 0; i < MP_LED_SCENE_COUNT; i++) {
+        const struct mp_led_profile *profile = &g_state.led_profiles[i];
+        const char *name = led_scene_config_key((enum mp_led_scene)i);
+        fprintf(f, "led_%s_effect=%u\n", name, profile->effect);
+        fprintf(f, "led_%s_brightness=%u\n", name, profile->brightness);
+        fprintf(f, "led_%s_cycle_seconds=%u\n", name, profile->cycle_seconds);
+        fprintf(f, "led_%s_red1=%u\n", name, profile->red1);
+        fprintf(f, "led_%s_green1=%u\n", name, profile->green1);
+        fprintf(f, "led_%s_blue1=%u\n", name, profile->blue1);
+        fprintf(f, "led_%s_red2=%u\n", name, profile->red2);
+        fprintf(f, "led_%s_green2=%u\n", name, profile->green2);
+        fprintf(f, "led_%s_blue2=%u\n", name, profile->blue2);
+    }
+    fprintf(f, "last_successful_alarm=%lld\n", g_state.last_successful_alarm);
+    fprintf(f, "pending_message_at=%lld\n", (long long)g_state.pending_message_at);
+    fprintf(f, "pending_message_image_bedtime=%d\n",
+            g_state.pending_message_image_bedtime ? 1 : 0);
+    fprintf(f, "pending_message_notification_sound=%d\n",
+            g_state.pending_message_notification_sound ? 1 : 0);
+    {
+        char enc_image[sizeof(g_state.pending_message_image_file) * 3];
+        char enc_text[sizeof(g_state.pending_message_text) * 3];
+        config_encode_to_buffer(enc_image, sizeof(enc_image), g_state.pending_message_image_file);
+        config_encode_to_buffer(enc_text, sizeof(enc_text), g_state.pending_message_text);
+        fprintf(f, "pending_message_image_file=%s\n", enc_image);
+        fprintf(f, "pending_message_text=%s\n", enc_text);
+    }
     pthread_mutex_unlock(&g_state.lock);
 
     int ok = 1;
@@ -717,9 +955,7 @@ static void save_config(void) {
     if (fclose(f) != 0) ok = 0;
 
     if (ok) {
-        if (rename(tmp_path, CONFIG_FILE) != 0) {
-            unlink(tmp_path);
-        }
+        if (rename(tmp_path, CONFIG_FILE) != 0) unlink(tmp_path);
     } else {
         unlink(tmp_path);
     }
@@ -729,7 +965,7 @@ static void load_config(void) {
     FILE *f = fopen(CONFIG_FILE, "r");
     if (!f) return;
 
-    char line[384];
+    char line[1024];
     while (fgets(line, sizeof(line), f)) {
         char *eq = strchr(line, '=');
         if (!eq) continue;
@@ -738,8 +974,41 @@ static void load_config(void) {
         char *val = eq + 1;
         val[strcspn(val, "\r\n")] = '\0';
 
-        int matched = 0;
+        int matched = load_led_config_value(key, val);
         char tmp_key[128];
+        if (!matched && strcmp(key, "last_successful_alarm") == 0) {
+            char *end = NULL;
+            errno = 0;
+            long long parsed = strtoll(val, &end, 10);
+            if (!errno && end != val && *end == '\0' && parsed > 0)
+                g_state.last_successful_alarm = parsed;
+            matched = 1;
+        } else if (strcmp(key, "pending_message_at") == 0) {
+            char *end = NULL;
+            errno = 0;
+            long long parsed = strtoll(val, &end, 10);
+            if (!errno && end != val && *end == '\0' && parsed > 0)
+                g_state.pending_message_at = (time_t)parsed;
+            matched = 1;
+        } else if (strcmp(key, "pending_message_image_bedtime") == 0) {
+            g_state.pending_message_image_bedtime = atoi(val) ? 1 : 0;
+            matched = 1;
+        } else if (strcmp(key, "pending_message_notification_sound") == 0) {
+            g_state.pending_message_notification_sound = atoi(val) ? 1 : 0;
+            matched = 1;
+        } else if (strcmp(key, "pending_message_image_file") == 0) {
+            char decoded[384];
+            safe_str(decoded, sizeof(decoded), val);
+            config_decode_inplace(decoded);
+            safe_str(g_state.pending_message_image_file, sizeof(g_state.pending_message_image_file), decoded);
+            matched = 1;
+        } else if (strcmp(key, "pending_message_text") == 0) {
+            char decoded[768];
+            safe_str(decoded, sizeof(decoded), val);
+            config_decode_inplace(decoded);
+            safe_str(g_state.pending_message_text, sizeof(g_state.pending_message_text), decoded);
+            matched = 1;
+        }
 #define LOAD_CONFIG_ALARM_INT(idx, field_str, field, fmt, conversion) \
         do { \
             snprintf(tmp_key, sizeof(tmp_key), "alarm%d_%s", (idx) + 1, field_str); \
@@ -785,12 +1054,15 @@ static void load_config(void) {
         } while (0);
         CONFIG_STRING_FIELDS(LOAD_CONFIG_STRING)
 #undef LOAD_CONFIG_STRING
-        if (!matched && strcmp(key, "web_font") == 0) g_state.oled_font = atoi(val); /* old config compatibility */
     }
 
     fclose(f);
 
     g_state.global_volume = clamp_int(g_state.global_volume, 0, 100);
+    g_state.story_mode_enabled = g_state.story_mode_enabled ? 1 : 0;
+    g_state.story_volume = clamp_int(g_state.story_volume, 0, 100);
+    sanitize_message_text(g_state.story_message, sizeof(g_state.story_message));
+    if (!g_state.story_message[0]) safe_str(g_state.story_message, sizeof(g_state.story_message), "STORY MODE!");
     g_state.show_song_metadata = g_state.show_song_metadata ? 1 : 0;
     g_state.bedtime_enabled = g_state.bedtime_enabled ? 1 : 0;
     g_state.bedtime_start_hour = clamp_int(g_state.bedtime_start_hour, 0, 23);
@@ -798,7 +1070,13 @@ static void load_config(void) {
     g_state.bedtime_end_hour = clamp_int(g_state.bedtime_end_hour, 0, 23);
     g_state.bedtime_end_min = clamp_int(g_state.bedtime_end_min, 0, 59);
     g_state.bedtime_dim_percent = clamp_int(g_state.bedtime_dim_percent, 0, 100);
+    g_state.bedtime_music_enabled = g_state.bedtime_music_enabled ? 1 : 0;
+    if (g_state.last_successful_alarm < 0) g_state.last_successful_alarm = 0;
     g_state.clock_24h_mode = g_state.clock_24h_mode ? 1 : 0;
+    g_state.oled_color = clamp_int(g_state.oled_color, MP_OLED_COLOR_YELLOW, MP_OLED_COLOR_WHITE);
+    for (int i = 0; i < MP_LED_SCENE_COUNT; i++)
+        sanitize_led_profile(&g_state.led_profiles[i]);
+    sanitize_led_settings(&g_state.led_settings);
 
     for (int i = 0; i < MAX_ALARMS; i++) {
         struct alarm_slot *a = &g_state.alarms[i];
@@ -815,10 +1093,43 @@ static void load_config(void) {
         }
     }
 
+    time_t now = time(NULL);
+    if (g_state.pending_message_at > now + (time_t)(30 * 24 * 60 * 60)) {
+        g_state.pending_message_at = 0;
+        g_state.pending_message_image_file[0] = '\0';
+        g_state.pending_message_image_bedtime = 0;
+        g_state.pending_message_notification_sound = 0;
+        g_state.pending_message_text[0] = '\0';
+    } else if (g_state.pending_message_at > 0) {
+        g_state.pending_message_image_bedtime = g_state.pending_message_image_bedtime ? 1 : 0;
+        g_state.pending_message_notification_sound = g_state.pending_message_notification_sound ? 1 : 0;
+        int pending_image_ok = 0;
+        if (safe_image_filename(g_state.pending_message_image_file)) {
+            char pending_path[512];
+            pending_image_ok = make_image_path_by_file(
+                g_state.pending_message_image_file,
+                g_state.pending_message_image_bedtime,
+                pending_path, sizeof(pending_path)) == 0 &&
+                access(pending_path, R_OK) == 0;
+        }
+        if (!pending_image_ok)
+            g_state.pending_message_image_file[0] = '\0';
+        sanitize_message_text(g_state.pending_message_text, sizeof(g_state.pending_message_text));
+        if (!g_state.pending_message_text[0] && !pending_image_ok) {
+            g_state.pending_message_at = 0;
+            g_state.pending_message_image_bedtime = 0;
+            g_state.pending_message_notification_sound = 0;
+        }
+    } else {
+        g_state.pending_message_image_file[0] = '\0';
+        g_state.pending_message_image_bedtime = 0;
+        g_state.pending_message_notification_sound = 0;
+        g_state.pending_message_text[0] = '\0';
+    }
+
     sanitize_clock_name(g_state.clock_name);
     if (g_state.oled_font < 0 || g_state.oled_font > 3) g_state.oled_font = 0;
     if (g_state.oled_font_size < 18 || g_state.oled_font_size > 54) g_state.oled_font_size = 48;
-    sync_legacy_alarm_fields_locked();
 }
 
 /* ---------------- OLED low level ---------------- */
@@ -879,9 +1190,12 @@ static int oled_set_brightness_percent(int percent) {
 
     /* SSD1322 brightness is much more obvious when both current controls move.
        0xC1 = contrast current, 0xC7 = master current. */
+    /* Truncate instead of rounding at the low end. At 10%, rounding made
+       both the master current and a white pixel level 2, causing a large
+       jump above 0%. Truncation gives level 1 and minimum master current. */
     int hardware_percent = percent <= 0 ? 1 : percent;
-    int contrast = (127 * hardware_percent + 50) / 100;
-    int master = (15 * hardware_percent + 50) / 100;
+    int contrast = (127 * hardware_percent) / 100;
+    int master = (15 * hardware_percent) / 100;
     contrast = clamp_int(contrast, 1, 127);
     master = clamp_int(master, 1, 15);
 
@@ -908,6 +1222,10 @@ static int time_in_window_minutes(int now_min, int start_min, int end_min) {
 
 static void apply_bedtime_brightness(void) {
     int bedtime_enabled, sh, sm, eh, em, dim_pct, current_pct;
+    int preview_pct;
+    time_t preview_until;
+    time_t now = time(NULL);
+
     pthread_mutex_lock(&g_state.lock);
     bedtime_enabled = g_state.bedtime_enabled;
     sh = g_state.bedtime_start_hour;
@@ -916,9 +1234,16 @@ static void apply_bedtime_brightness(void) {
     em = g_state.bedtime_end_min;
     dim_pct = g_state.bedtime_dim_percent;
     current_pct = g_state.oled_brightness_current;
+    preview_pct = g_state.brightness_preview_percent;
+    preview_until = g_state.brightness_preview_until;
+    if (preview_until > 0 && preview_until <= now) {
+        g_state.brightness_preview_percent = -1;
+        g_state.brightness_preview_until = 0;
+        preview_pct = -1;
+        preview_until = 0;
+    }
     pthread_mutex_unlock(&g_state.lock);
 
-    time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
     int now_min = tmv.tm_hour * 60 + tmv.tm_min;
@@ -926,12 +1251,12 @@ static void apply_bedtime_brightness(void) {
     int end_min = eh * 60 + em;
     int in_bedtime = bedtime_enabled && time_in_window_minutes(now_min, start_min, end_min);
 
-    /* bedtime_dim_percent means percent of normal brightness during bedtime.
-       Example: 20 = very dim, 35 = dim, 100 = no dimming. */
-    int target_pct = in_bedtime ? clamp_int(dim_pct, 0, 100) : 100;
-    if (target_pct != current_pct) {
-        oled_set_brightness_percent(target_pct);
-    }
+    /* A live GUI preview temporarily overrides the schedule. Once it expires,
+       bedtime_dim_percent applies during bedtime and daytime returns to 100%. */
+    int target_pct = preview_until > now && preview_pct >= 0
+        ? clamp_int(preview_pct, 0, 100)
+        : (in_bedtime ? clamp_int(dim_pct, 0, 100) : 100);
+    if (target_pct != current_pct) oled_set_brightness_percent(target_pct);
 }
 
 static int is_bedtime_now(void) {
@@ -951,27 +1276,146 @@ static int is_bedtime_now(void) {
     return bedtime_enabled && time_in_window_minutes(now_min, sh * 60 + sm, eh * 60 + em);
 }
 
+static void update_led_scene(void) {
+    time_t now = time(NULL);
+    enum mp_led_scene scene = MP_LED_SCENE_DAYTIME;
+    struct mp_led_profile profile;
+    struct mp_led_profile preview_profile;
+    struct mp_led_profile daytime_profile;
+    struct mp_led_profile bedtime_profile;
+    struct mp_led_global_settings settings;
+    int preview_scene = -1;
+    int preview_active = 0;
+    int preview_bypass_master = 0;
+    int preview_raw_output = 0;
+    int alarm_active;
+    int display_mode;
+    time_t message_until;
+    int story_playing;
+    int audio_playing;
+    int bedtime_enabled;
+    int bedtime_start_hour;
+    int bedtime_start_min;
+    int touch_ok;
+    int touch_pressed;
+
+    pthread_mutex_lock(&g_state.lock);
+    if (g_state.led_preview_until > 0 && g_state.led_preview_until <= now) {
+        g_state.led_preview_until = 0;
+        g_state.led_preview_scene = -1;
+        g_state.led_preview_bypass_master = 0;
+        g_state.led_preview_raw_output = 0;
+    }
+    if (g_state.led_preview_until > now &&
+        g_state.led_preview_scene >= 0 &&
+        g_state.led_preview_scene < MP_LED_SCENE_COUNT) {
+        preview_scene = g_state.led_preview_scene;
+        preview_profile = g_state.led_preview_profile;
+        preview_bypass_master = g_state.led_preview_bypass_master;
+        preview_raw_output = g_state.led_preview_raw_output;
+        preview_active = 1;
+    }
+    alarm_active = g_state.alarm_active;
+    display_mode = g_state.display_mode;
+    message_until = g_state.message_until;
+    story_playing = g_state.story_playing;
+    audio_playing = g_state.audio_playing;
+    bedtime_enabled = g_state.bedtime_enabled;
+    bedtime_start_hour = g_state.bedtime_start_hour;
+    bedtime_start_min = g_state.bedtime_start_min;
+    daytime_profile = g_state.led_profiles[MP_LED_SCENE_DAYTIME];
+    bedtime_profile = g_state.led_profiles[MP_LED_SCENE_BEDTIME];
+    settings = g_state.led_settings;
+    g_state.led_bedtime_fade_active = 0;
+    pthread_mutex_unlock(&g_state.lock);
+    touch_get_state(&touch_ok, &touch_pressed);
+
+    /* Touch feedback is immediate. Alarm still wins once the press is released. */
+    if (touch_ok && touch_pressed && settings.touch_blink_enabled) {
+        scene = MP_LED_SCENE_TOUCH;
+        profile = (struct mp_led_profile)LED_PROFILE(
+            MP_LED_EFFECT_FADE, settings.touch_blink_brightness, 2,
+            settings.touch_blink_red, settings.touch_blink_green, settings.touch_blink_blue,
+            0, 0, 0);
+    } else if (alarm_active) {
+        scene = MP_LED_SCENE_ALARM;
+        pthread_mutex_lock(&g_state.lock);
+        profile = g_state.led_profiles[scene];
+        pthread_mutex_unlock(&g_state.lock);
+    } else if (preview_active) {
+        scene = (enum mp_led_scene)preview_scene;
+        profile = preview_profile;
+    } else {
+        if (display_mode == 2 && message_until > now) scene = MP_LED_SCENE_MESSAGE;
+        else if (story_playing) scene = MP_LED_SCENE_STORIES;
+        else if (audio_playing) scene = MP_LED_SCENE_MUSIC;
+        else if (is_bedtime_now()) scene = MP_LED_SCENE_BEDTIME;
+        else scene = MP_LED_SCENE_DAYTIME;
+
+        pthread_mutex_lock(&g_state.lock);
+        profile = g_state.led_profiles[scene];
+        pthread_mutex_unlock(&g_state.lock);
+
+        if (scene == MP_LED_SCENE_DAYTIME && settings.idle_off) {
+            profile.brightness = 0;
+        } else if (scene == MP_LED_SCENE_DAYTIME && bedtime_enabled &&
+                   settings.bedtime_fade_minutes > 0) {
+            struct tm tmv;
+            localtime_r(&now, &tmv);
+            int current_minute = tmv.tm_hour * 60 + tmv.tm_min;
+            int start_minute = bedtime_start_hour * 60 + bedtime_start_min;
+            int until_start = (start_minute - current_minute + 1440) % 1440;
+            int fade_minutes = settings.bedtime_fade_minutes;
+            if (until_start > 0 && until_start <= fade_minutes) {
+                int elapsed = fade_minutes - until_start;
+                int blended = ((int)daytime_profile.brightness * (fade_minutes - elapsed) +
+                               (int)bedtime_profile.brightness * elapsed + fade_minutes / 2) /
+                              fade_minutes;
+                profile.brightness = (uint8_t)clamp_int(blended, 0, 100);
+                pthread_mutex_lock(&g_state.lock);
+                g_state.led_bedtime_fade_active = 1;
+                pthread_mutex_unlock(&g_state.lock);
+            }
+        }
+    }
+
+    sanitize_led_profile(&profile);
+    sanitize_led_settings(&settings);
+    if (preview_active && preview_bypass_master) settings.enabled = 1;
+    if (preview_active && preview_raw_output) {
+        settings.enabled = 1;
+        settings.max_brightness = 100;
+        settings.red_gain = 100;
+        settings.green_gain = 100;
+        settings.blue_gain = 100;
+    }
+    mp_led_set_global(&settings);
+    mp_led_set(scene, &profile);
+}
+
 static void oled_clear_fb(uint8_t gray4) {
     gray4 &= 0x0F;
-    memset(g_oled.fb, (gray4 << 4) | gray4, sizeof(g_oled.fb));
+    memset(oled_draw_fb(), (gray4 << 4) | gray4, OLED_FB_BYTES);
 }
 
 static void oled_set_px(int x, int y, uint8_t gray4) {
     if (x < 0 || y < 0 || x >= OLED_W || y >= OLED_H) return;
+    uint8_t *fb = oled_draw_fb();
     gray4 &= 0x0F;
     size_t idx = (size_t)(y * OLED_W + x) / 2;
     if ((x & 1) == 0) {
-        g_oled.fb[idx] = (g_oled.fb[idx] & 0x0F) | (gray4 << 4);
+        fb[idx] = (fb[idx] & 0x0F) | (gray4 << 4);
     } else {
-        g_oled.fb[idx] = (g_oled.fb[idx] & 0xF0) | gray4;
+        fb[idx] = (fb[idx] & 0xF0) | gray4;
     }
 }
 
 static uint8_t oled_get_px(int x, int y) {
     if (x < 0 || y < 0 || x >= OLED_W || y >= OLED_H) return 0;
+    const uint8_t *fb = oled_draw_fb();
     size_t idx = (size_t)(y * OLED_W + x) / 2;
-    if ((x & 1) == 0) return (g_oled.fb[idx] >> 4) & 0x0F;
-    return g_oled.fb[idx] & 0x0F;
+    if ((x & 1) == 0) return (fb[idx] >> 4) & 0x0F;
+    return fb[idx] & 0x0F;
 }
 
 /*
@@ -1050,6 +1494,28 @@ static void oled_draw_pill(int x, int y, int w, int h, uint8_t bg, uint8_t borde
     }
 }
 
+static void oled_apply_brightness_to_buffer(uint8_t *buffer, size_t len, int brightness_percent) {
+    if (!buffer || len == 0) return;
+    brightness_percent = clamp_int(brightness_percent < 0 ? 100 : brightness_percent, 0, 100);
+    if (brightness_percent >= 100) return;
+
+    for (size_t i = 0; i < len; i++) {
+        uint8_t hi = (buffer[i] >> 4) & 0x0F;
+        uint8_t lo = buffer[i] & 0x0F;
+        uint8_t original_hi = hi;
+        uint8_t original_lo = lo;
+        hi = (uint8_t)((hi * brightness_percent) / 100);
+        lo = (uint8_t)((lo * brightness_percent) / 100);
+        /* Any non-zero slider value remains visible at the panel's minimum
+           grayscale step instead of behaving like 0%. */
+        if (brightness_percent > 0 && original_hi > 0 && hi == 0) hi = 1;
+        if (brightness_percent > 0 && original_lo > 0 && lo == 0) lo = 1;
+        if (hi > 15) hi = 15;
+        if (lo > 15) lo = 15;
+        buffer[i] = (uint8_t)((hi << 4) | lo);
+    }
+}
+
 static int oled_flush_region_bytes(int byte_start, int byte_end, int row_start, int row_end) {
     static uint8_t tmp[OLED_FB_BYTES];
 
@@ -1082,18 +1548,7 @@ static int oled_flush_region_bytes(int byte_start, int byte_end, int row_start, 
     pthread_mutex_lock(&g_state.lock);
     brightness_percent = g_state.oled_brightness_current;
     pthread_mutex_unlock(&g_state.lock);
-    brightness_percent = clamp_int(brightness_percent < 0 ? 100 : brightness_percent, 0, 100);
-    if (brightness_percent < 100) {
-        for (size_t i = 0; i < tmp_len; i++) {
-            uint8_t hi = (tmp[i] >> 4) & 0x0F;
-            uint8_t lo = tmp[i] & 0x0F;
-            hi = (uint8_t)((hi * brightness_percent + 50) / 100);
-            lo = (uint8_t)((lo * brightness_percent + 50) / 100);
-            if (hi > 15) hi = 15;
-            if (lo > 15) lo = 15;
-            tmp[i] = (uint8_t)((hi << 4) | lo);
-        }
-    }
+    oled_apply_brightness_to_buffer(tmp, tmp_len, brightness_percent);
 
     int col_start = 0x1C + (byte_start / 2);
     int col_end = 0x1C + (byte_end / 2);
@@ -1103,6 +1558,16 @@ static int oled_flush_region_bytes(int byte_start, int byte_end, int row_start, 
     else if (oled_cmd2(0x75, (uint8_t)row_start, (uint8_t)row_end) != 0) rc = -1;
     else if (oled_cmd(0x5C) != 0) rc = -1;
     else if (oled_data(tmp, tmp_len) != 0) rc = -1;
+
+    if (rc == 0) {
+        pthread_mutex_lock(&g_oled.preview_lock);
+        for (int y = 0; y < height; y++) {
+            memcpy(g_oled.preview_fb + ((size_t)(row_start + y) * OLED_ROW_BYTES) + byte_start,
+                   tmp + ((size_t)y * (size_t)width_bytes),
+                   (size_t)width_bytes);
+        }
+        pthread_mutex_unlock(&g_oled.preview_lock);
+    }
 
     return rc;
 }
@@ -1290,7 +1755,15 @@ static const uint8_t font5x7_digits[10][7] = {
 };
 
 
+static uint32_t utf8_next_codepoint(const unsigned char **cursor);
+
 static const uint8_t font5x7_unknown[7] = {0x1F,0x11,0x01,0x02,0x04,0x00,0x04};
+static const uint8_t font5x7_a_umlaut[7] = {0x0A,0x00,0x0E,0x11,0x1F,0x11,0x11};
+static const uint8_t font5x7_e_umlaut[7] = {0x0A,0x00,0x1F,0x10,0x1E,0x10,0x1F};
+static const uint8_t font5x7_i_umlaut[7] = {0x0A,0x00,0x0E,0x04,0x04,0x04,0x0E};
+static const uint8_t font5x7_o_umlaut[7] = {0x0A,0x00,0x0E,0x11,0x11,0x11,0x0E};
+static const uint8_t font5x7_u_umlaut[7] = {0x0A,0x00,0x11,0x11,0x11,0x11,0x0E};
+static const uint8_t font5x7_y_umlaut[7] = {0x0A,0x00,0x11,0x0A,0x04,0x04,0x04};
 
 static const uint8_t font5x7_table[128][7] = {
     [' '] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00},
@@ -1354,8 +1827,75 @@ static const uint8_t font5x7_known[128] = {
     ['U'] = 1, ['V'] = 1, ['W'] = 1, ['X'] = 1, ['Y'] = 1, ['Z'] = 1
 };
 
-static const uint8_t *font5x7_glyph(char ch) {
-    unsigned char idx = (unsigned char)ch;
+static const uint8_t *font5x7_glyph(uint32_t cp) {
+    switch (cp) {
+        case 0x00c4: case 0x00e4: return font5x7_a_umlaut;
+        case 0x00cb: case 0x00eb: return font5x7_e_umlaut;
+        case 0x00cf: case 0x00ef: return font5x7_i_umlaut;
+        case 0x00d6: case 0x00f6: return font5x7_o_umlaut;
+        case 0x00dc: case 0x00fc: return font5x7_u_umlaut;
+        case 0x0178: case 0x00ff: return font5x7_y_umlaut;
+        default: break;
+    }
+
+    unsigned char idx = 0;
+    if (cp < 0x80) {
+        idx = (unsigned char)cp;
+    } else {
+        switch (cp) {
+            case 0x00c0: case 0x00c1: case 0x00c2: case 0x00c3: case 0x00c5:
+            case 0x00e0: case 0x00e1: case 0x00e2: case 0x00e3: case 0x00e5:
+            case 0x0100: case 0x0101: case 0x0102: case 0x0103: case 0x0104: case 0x0105:
+            case 0x00c6: case 0x00e6:
+                idx = 'A'; break;
+            case 0x00c7: case 0x00e7: case 0x0106: case 0x0107: case 0x010c: case 0x010d:
+                idx = 'C'; break;
+            case 0x00d0: case 0x00f0: case 0x010e: case 0x010f:
+                idx = 'D'; break;
+            case 0x00c8: case 0x00c9: case 0x00ca:
+            case 0x00e8: case 0x00e9: case 0x00ea:
+            case 0x0112: case 0x0113: case 0x0116: case 0x0117: case 0x0118: case 0x0119:
+                idx = 'E'; break;
+            case 0x011e: case 0x011f:
+                idx = 'G'; break;
+            case 0x00cc: case 0x00cd: case 0x00ce:
+            case 0x00ec: case 0x00ed: case 0x00ee:
+            case 0x012a: case 0x012b: case 0x012e: case 0x012f:
+                idx = 'I'; break;
+            case 0x0139: case 0x013a: case 0x013d: case 0x013e: case 0x0141: case 0x0142:
+                idx = 'L'; break;
+            case 0x00d1: case 0x00f1: case 0x0143: case 0x0144: case 0x0147: case 0x0148:
+                idx = 'N'; break;
+            case 0x00d2: case 0x00d3: case 0x00d4: case 0x00d5: case 0x00d8:
+            case 0x00f2: case 0x00f3: case 0x00f4: case 0x00f5: case 0x00f8:
+            case 0x014c: case 0x014d: case 0x0150: case 0x0151: case 0x0152: case 0x0153:
+                idx = 'O'; break;
+            case 0x0154: case 0x0155: case 0x0158: case 0x0159:
+                idx = 'R'; break;
+            case 0x015a: case 0x015b: case 0x0160: case 0x0161: case 0x00df:
+                idx = 'S'; break;
+            case 0x0164: case 0x0165: case 0x00de: case 0x00fe:
+                idx = 'T'; break;
+            case 0x00d9: case 0x00da: case 0x00db:
+            case 0x00f9: case 0x00fa: case 0x00fb:
+            case 0x016a: case 0x016b: case 0x016e: case 0x016f: case 0x0170: case 0x0171:
+                idx = 'U'; break;
+            case 0x00dd: case 0x00fd:
+                idx = 'Y'; break;
+            case 0x0179: case 0x017a: case 0x017b: case 0x017c: case 0x017d: case 0x017e:
+                idx = 'Z'; break;
+            case 0x00a0:
+                idx = ' '; break;
+            case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2212:
+                idx = '-'; break;
+            case 0x2018: case 0x2019: case 0x201a: case 0x201b:
+            case 0x201c: case 0x201d: case 0x201e: case 0x201f:
+                idx = '\''; break;
+            default:
+                return font5x7_unknown;
+        }
+    }
+
     if (idx >= 'a' && idx <= 'z') idx = (unsigned char)(idx - 'a' + 'A');
     if (idx < 128 && font5x7_known[idx]) return font5x7_table[idx];
     return font5x7_unknown;
@@ -1365,12 +1905,17 @@ static int text5x7_width(const char *text, int scale) {
     if (!text || !*text) return 0;
     if (scale < 1) scale = 1;
     int n = 0;
-    for (const char *p = text; *p; p++) n++;
-    return n * 5 * scale + (n - 1) * scale;
+    const unsigned char *cursor = (const unsigned char *)text;
+    while (*cursor) {
+        uint32_t cp = utf8_next_codepoint(&cursor);
+        if (cp >= 0x0300 && cp <= 0x036f) continue;
+        n++;
+    }
+    return n > 0 ? n * 5 * scale + (n - 1) * scale : 0;
 }
 
-static void draw_char5x7(int x, int y, int scale, char ch, uint8_t c) {
-    const uint8_t *g = font5x7_glyph(ch);
+static void draw_char5x7(int x, int y, int scale, uint32_t cp, uint8_t c) {
+    const uint8_t *g = font5x7_glyph(cp);
     if (scale < 1) scale = 1;
     for (int row = 0; row < 7; row++) {
         uint8_t bits = g[row];
@@ -1385,8 +1930,11 @@ static void draw_char5x7(int x, int y, int scale, char ch, uint8_t c) {
 static void draw_text5x7(int x, int y, int scale, const char *text, uint8_t c) {
     if (!text) return;
     if (scale < 1) scale = 1;
-    for (const char *p = text; *p; p++) {
-        draw_char5x7(x, y, scale, *p, c);
+    const unsigned char *cursor = (const unsigned char *)text;
+    while (*cursor) {
+        uint32_t cp = utf8_next_codepoint(&cursor);
+        if (cp >= 0x0300 && cp <= 0x036f) continue;
+        draw_char5x7(x, y, scale, cp, c);
         x += 6 * scale;
     }
 }
@@ -1398,34 +1946,51 @@ static uint64_t monotonic_millis(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-static void oled_ascii_text(const char *input, char *output, size_t output_len) {
-    if (!output || output_len == 0) return;
-    output[0] = '\0';
-    if (!input) return;
-    size_t used = 0;
-    for (const unsigned char *p = (const unsigned char *)input; *p && used + 1 < output_len;) {
-        if (*p < 0x80) {
-            unsigned char ch = *p++;
-            if (ch < 32 || ch == 127) ch = ' ';
-            output[used++] = (char)toupper(ch);
-            continue;
-        }
-        unsigned char first = *p++;
-        int continuation = (first & 0xe0) == 0xc0 ? 1 : (first & 0xf0) == 0xe0 ? 2 : (first & 0xf8) == 0xf0 ? 3 : 0;
-        while (continuation-- > 0 && (*p & 0xc0) == 0x80) p++;
-        output[used++] = '?';
-    }
-    output[used] = '\0';
+static uint32_t utf8_next_codepoint(const unsigned char **cursor) {
+    const unsigned char *p = cursor ? *cursor : NULL;
+    if (!p || !*p) return 0;
 
-    char *src = output;
-    while (*src == ' ') src++;
-    if (src != output) memmove(output, src, strlen(src) + 1);
-    size_t len = strlen(output);
-    while (len && output[len - 1] == ' ') output[--len] = '\0';
+    uint32_t cp;
+    size_t count;
+    if (p[0] < 0x80) {
+        cp = p[0];
+        count = 1;
+    } else if ((p[0] & 0xe0) == 0xc0 && p[1]) {
+        cp = (uint32_t)(p[0] & 0x1f);
+        count = 2;
+    } else if ((p[0] & 0xf0) == 0xe0 && p[1] && p[2]) {
+        cp = (uint32_t)(p[0] & 0x0f);
+        count = 3;
+    } else if ((p[0] & 0xf8) == 0xf0 && p[1] && p[2] && p[3]) {
+        cp = (uint32_t)(p[0] & 0x07);
+        count = 4;
+    } else {
+        *cursor = p + 1;
+        return 0xfffd;
+    }
+
+    for (size_t i = 1; i < count; i++) {
+        if ((p[i] & 0xc0) != 0x80) {
+            *cursor = p + 1;
+            return 0xfffd;
+        }
+        cp = (cp << 6) | (uint32_t)(p[i] & 0x3f);
+    }
+
+    if ((count == 2 && cp < 0x80) ||
+        (count == 3 && cp < 0x800) ||
+        (count == 4 && cp < 0x10000) ||
+        cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+        *cursor = p + 1;
+        return 0xfffd;
+    }
+
+    *cursor = p + count;
+    return cp;
 }
 
-static void draw_char5x7_clipped(int x, int y, char ch, uint8_t c, int clip_x0, int clip_x1) {
-    const uint8_t *glyph = font5x7_glyph(ch);
+static void draw_char5x7_clipped(int x, int y, uint32_t cp, uint8_t c, int clip_x0, int clip_x1) {
+    const uint8_t *glyph = font5x7_glyph(cp);
     for (int row = 0; row < 7; row++) {
         uint8_t bits = glyph[row];
         for (int col = 0; col < 5; col++) {
@@ -1438,39 +2003,48 @@ static void draw_char5x7_clipped(int x, int y, char ch, uint8_t c, int clip_x0, 
 
 static void draw_text5x7_clipped(int x, int y, const char *text, uint8_t c, int clip_x0, int clip_x1) {
     if (!text || clip_x1 <= clip_x0) return;
-    for (const char *p = text; *p; p++, x += 6) {
+    const unsigned char *cursor = (const unsigned char *)text;
+    while (*cursor) {
+        uint32_t cp = utf8_next_codepoint(&cursor);
+        if (cp >= 0x0300 && cp <= 0x036f) continue;
         if (x >= clip_x1) break;
-        if (x + 5 > clip_x0) draw_char5x7_clipped(x, y, *p, c, clip_x0, clip_x1);
+        if (x + 5 > clip_x0) draw_char5x7_clipped(x, y, cp, c, clip_x0, clip_x1);
+        x += 6;
     }
 }
 
-static int song_scroll_offset(int text_width, int viewport_width, uint64_t started_ms) {
-    int travel = text_width - viewport_width;
-    if (travel <= 0) return 0;
-    uint64_t travel_ms = ((uint64_t)travel * 1000u + SONG_SCROLL_SPEED_PX_PER_SEC - 1u) /
-                         SONG_SCROLL_SPEED_PX_PER_SEC;
-    uint64_t cycle = SONG_SCROLL_PAUSE_MS + travel_ms + SONG_SCROLL_PAUSE_MS + travel_ms;
-    if (cycle == 0) return 0;
+static int song_marquee_offset(int cycle_width, uint64_t started_ms) {
+    if (cycle_width <= 0) return 0;
     uint64_t now_ms = monotonic_millis();
     uint64_t elapsed = now_ms >= started_ms ? now_ms - started_ms : 0;
-    uint64_t phase = elapsed % cycle;
-    if (phase < SONG_SCROLL_PAUSE_MS) return 0;
-    phase -= SONG_SCROLL_PAUSE_MS;
-    if (phase < travel_ms) return (int)((phase * (uint64_t)travel) / travel_ms);
-    phase -= travel_ms;
-    if (phase < SONG_SCROLL_PAUSE_MS) return travel;
-    phase -= SONG_SCROLL_PAUSE_MS;
-    return travel - (int)((phase * (uint64_t)travel) / travel_ms);
+    uint64_t pixels = (elapsed * SONG_SCROLL_SPEED_PX_PER_SEC) / 1000u;
+    return (int)(pixels % (uint64_t)cycle_width);
 }
 
 static void draw_song_metadata_line(const char *text, uint64_t started_ms) {
     if (!text || !*text) return;
+
     int width = text5x7_width(text, 1);
-    int x = SONG_METADATA_X;
-    if (width <= SONG_METADATA_W) x += (SONG_METADATA_W - width) / 2;
-    else x -= song_scroll_offset(width, SONG_METADATA_W, started_ms);
+    int clip_x1 = SONG_METADATA_X + SONG_METADATA_W;
+
+    /* Keep metadata still and centred when the full Title - Artist fits. */
+    if (width <= SONG_METADATA_W) {
+        int x = SONG_METADATA_X + (SONG_METADATA_W - width) / 2;
+        draw_text5x7_clipped(x, OLED_H - 8, text, 11,
+                             SONG_METADATA_X, clip_x1);
+        return;
+    }
+
+    int cycle_width = SONG_METADATA_W + width + SONG_SCROLL_GAP_PX;
+    int x = clip_x1 - song_marquee_offset(cycle_width, started_ms);
+
+    /* Overflowing metadata enters from the right, moves left, leaves fully,
+       then repeats after the configured blank gap. */
     draw_text5x7_clipped(x, OLED_H - 8, text, 11,
-                         SONG_METADATA_X, SONG_METADATA_X + SONG_METADATA_W);
+                         SONG_METADATA_X, clip_x1);
+    x += cycle_width;
+    draw_text5x7_clipped(x, OLED_H - 8, text, 11,
+                         SONG_METADATA_X, clip_x1);
 }
 
 static void draw_version_corner(void) {
@@ -1843,7 +2417,7 @@ static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px
        In 12-hour mode, a single-digit hour should not reserve a visible-width
        leading slot. The earlier invisible-leading-zero trick kept the digits
        stable, but it also made 1:05 look shifted right and left too much blank
-       space between the face and the time. Instead, keep each displayed digit
+       space between the image and the time. Instead, keep each displayed digit
        in a fixed digit slot, but center the actual visible H:MM or HH:MM
        footprint.
     */
@@ -2019,19 +2593,26 @@ static void draw_long_date_centered_at(const struct tm *tmv, const char *font_fi
 
 static void draw_clock_footer_contents(const struct tm *tmv, int center_x,
                                        int alarm_on, int alarm_active, int alarm_volume_percent,
-                                       int audio_playing, int show_song_metadata,
+                                       int audio_playing, int show_song_metadata, int story_playing,
                                        const char *audio_display, uint64_t scroll_started_ms) {
     if (audio_playing && show_song_metadata && audio_display && audio_display[0])
         draw_song_metadata_line(audio_display, scroll_started_ms);
     else
         draw_long_date_centered_at(tmv, NULL, center_x);
-    draw_status_pills(alarm_on, alarm_active, alarm_volume_percent);
+
+    /* Story playback returns to the normal clock after the intro/title sequence,
+       but its small status pills stay hidden until the story ends. */
+    if (!story_playing)
+        draw_status_pills(alarm_on, alarm_active, alarm_volume_percent);
 }
 
-static int song_metadata_scroll_active(void) {
+static int song_metadata_marquee_active(void) {
     int active = 0;
+    uint64_t now_ms = monotonic_millis();
     pthread_mutex_lock(&g_state.lock);
-    if (g_state.audio_playing && g_state.show_song_metadata && g_state.audio_display[0])
+    int show = g_state.show_song_metadata;
+    if (g_state.story_playing) show = now_ms < g_state.story_title_until_ms;
+    if (g_state.audio_playing && show && g_state.audio_display[0])
         active = text5x7_width(g_state.audio_display, 1) > SONG_METADATA_W;
     pthread_mutex_unlock(&g_state.lock);
     return active;
@@ -2046,6 +2627,7 @@ static void refresh_clock_footer(void) {
     int alarm_volume_percent;
     int audio_playing;
     int show_song_metadata;
+    int story_playing;
     uint64_t scroll_started_ms;
     char audio_display[SONG_METADATA_TEXT_MAX];
 
@@ -2060,6 +2642,9 @@ static void refresh_clock_footer(void) {
     alarm_volume_percent = g_state.alarm_volume_percent;
     audio_playing = g_state.audio_playing;
     show_song_metadata = g_state.show_song_metadata;
+    story_playing = g_state.story_playing;
+    if (story_playing)
+        show_song_metadata = monotonic_millis() < g_state.story_title_until_ms;
     scroll_started_ms = g_state.audio_scroll_started_ms;
     safe_str(audio_display, sizeof(audio_display), g_state.audio_display);
     pthread_mutex_unlock(&g_state.lock);
@@ -2068,177 +2653,193 @@ static void refresh_clock_footer(void) {
     int clock_center_x = (CLOCK_SIDE_WIDGET_X + CLOCK_SIDE_WIDGET_SIZE + OLED_W) / 2;
     draw_clock_footer_contents(&tmv, clock_center_x, alarm_on, alarm_active,
                                alarm_volume_percent, audio_playing, show_song_metadata,
-                               audio_display, scroll_started_ms);
+                               story_playing, audio_display, scroll_started_ms);
     (void)oled_flush_region_bytes(0, OLED_ROW_BYTES - 1,
                                   OLED_H - CLOCK_STATUS_PILL_H, OLED_H - 1);
 }
 
-static int face_raw_pixel(const uint8_t *raw, int x, int y) {
-    if (!raw || x < 0 || y < 0 || x >= MP_FACE_WIDTH || y >= MP_FACE_HEIGHT) return 0;
-    uint8_t b = raw[(y * MP_FACE_WIDTH + x) / 2];
+static int image_raw_pixel(const uint8_t *raw, int x, int y) {
+    if (!raw || x < 0 || y < 0 || x >= MP_IMAGE_WIDTH || y >= MP_IMAGE_HEIGHT) return 0;
+    uint8_t b = raw[(y * MP_IMAGE_WIDTH + x) / 2];
     return (x & 1) ? (b & 0x0F) : ((b >> 4) & 0x0F);
 }
 
-static int load_face_raw_uncached_by_file(const char *file, int bedtime, uint8_t *raw, size_t raw_len) {
-    if (!raw || raw_len < MP_FACE_RAW_BYTES) return -1;
+static int load_image_raw_uncached_by_file(const char *file, int bedtime, uint8_t *raw, size_t raw_len) {
+    if (!raw || raw_len < MP_IMAGE_RAW_BYTES) return -1;
     char path[512];
-    int ok = bedtime
-        ? make_bedtime_face_path_by_file(file, path, sizeof(path))
-        : make_face_path_by_file(file, path, sizeof(path));
-    if (ok != 0) return -1;
+    if (make_image_path_by_file(file, bedtime, path, sizeof(path)) != 0) return -1;
 
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
-    size_t n = fread(raw, 1, MP_FACE_RAW_BYTES, f);
+    size_t n = fread(raw, 1, MP_IMAGE_RAW_BYTES, f);
     fclose(f);
-    return n == MP_FACE_RAW_BYTES ? 0 : -1;
+    return n == MP_IMAGE_RAW_BYTES ? 0 : -1;
 }
 
-static int load_face_raw_cached_by_file(const char *file, int bedtime, uint8_t *raw, size_t raw_len) {
-    if (!raw || raw_len < MP_FACE_RAW_BYTES || !safe_face_filename(file)) return -1;
+static int load_image_raw_cached_by_file(const char *file, int bedtime, uint8_t *raw, size_t raw_len) {
+    if (!raw || raw_len < MP_IMAGE_RAW_BYTES || !safe_image_filename(file)) return -1;
 
-    pthread_mutex_lock(&g_face_raw_cache_lock);
-    unsigned long generation = g_face_raw_cache.generation;
-    if (g_face_raw_cache.valid && g_face_raw_cache.bedtime == bedtime && strcmp(g_face_raw_cache.file, file) == 0) {
-        memcpy(raw, g_face_raw_cache.raw, MP_FACE_RAW_BYTES);
-        pthread_mutex_unlock(&g_face_raw_cache_lock);
+    pthread_mutex_lock(&g_image_raw_cache_lock);
+    unsigned long generation = g_image_raw_cache.generation;
+    if (g_image_raw_cache.valid && g_image_raw_cache.bedtime == bedtime && strcmp(g_image_raw_cache.file, file) == 0) {
+        memcpy(raw, g_image_raw_cache.raw, MP_IMAGE_RAW_BYTES);
+        pthread_mutex_unlock(&g_image_raw_cache_lock);
         return 0;
     }
-    pthread_mutex_unlock(&g_face_raw_cache_lock);
+    pthread_mutex_unlock(&g_image_raw_cache_lock);
 
-    uint8_t tmp[MP_FACE_RAW_BYTES];
-    if (load_face_raw_uncached_by_file(file, bedtime, tmp, sizeof(tmp)) != 0) return -1;
+    uint8_t tmp[MP_IMAGE_RAW_BYTES];
+    if (load_image_raw_uncached_by_file(file, bedtime, tmp, sizeof(tmp)) != 0) return -1;
 
-    pthread_mutex_lock(&g_face_raw_cache_lock);
-    if (g_face_raw_cache.generation == generation) {
-        safe_str(g_face_raw_cache.file, sizeof(g_face_raw_cache.file), file);
-        g_face_raw_cache.bedtime = bedtime ? 1 : 0;
-        memcpy(g_face_raw_cache.raw, tmp, MP_FACE_RAW_BYTES);
-        g_face_raw_cache.valid = 1;
+    pthread_mutex_lock(&g_image_raw_cache_lock);
+    if (g_image_raw_cache.generation == generation) {
+        safe_str(g_image_raw_cache.file, sizeof(g_image_raw_cache.file), file);
+        g_image_raw_cache.bedtime = bedtime ? 1 : 0;
+        memcpy(g_image_raw_cache.raw, tmp, MP_IMAGE_RAW_BYTES);
+        g_image_raw_cache.valid = 1;
     }
-    pthread_mutex_unlock(&g_face_raw_cache_lock);
+    pthread_mutex_unlock(&g_image_raw_cache_lock);
 
-    memcpy(raw, tmp, MP_FACE_RAW_BYTES);
+    memcpy(raw, tmp, MP_IMAGE_RAW_BYTES);
     return 0;
 }
 
-static int load_face_raw_by_file(const char *file, uint8_t *raw, size_t raw_len) {
-    return load_face_raw_cached_by_file(file, 0, raw, raw_len);
+static int collect_image_files(int bedtime, char files[][ASSET_LIST_NAME_MAX], int max_files) {
+    return scan_asset_files(image_dir(bedtime), ASSET_LIST_IMAGE_RAW, files, max_files);
 }
 
-static int load_bedtime_face_raw_by_file(const char *file, uint8_t *raw, size_t raw_len) {
-    return load_face_raw_cached_by_file(file, 1, raw, raw_len);
-}
-
-static int collect_uploaded_face_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    return scan_asset_files(FACE_DIR, ASSET_LIST_FACE_RAW, files, max_files);
-}
-
-static int collect_bedtime_face_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    return scan_asset_files(BEDTIME_FACE_DIR, ASSET_LIST_FACE_RAW, files, max_files);
-}
-
-static int collect_music_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
-    return scan_asset_files(MUSIC_DIR, ASSET_LIST_MUSIC_MP3, files, max_files);
-}
-
-
-static int random_uploaded_face_file(char *out, size_t out_len) {
+static int random_image_file(int bedtime, char *out, size_t out_len) {
     char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-    int count = collect_uploaded_face_files(files, ASSET_LIST_MAX_FILES);
+    int count = collect_image_files(bedtime, files, ASSET_LIST_MAX_FILES);
     if (count <= 0) return -1;
     safe_str(out, out_len, files[rand() % count]);
     return 0;
 }
 
-static int random_bedtime_face_file(char *out, size_t out_len) {
-    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-    int count = collect_bedtime_face_files(files, ASSET_LIST_MAX_FILES);
-    if (count <= 0) return -1;
-    safe_str(out, out_len, files[rand() % count]);
-    return 0;
-}
-
-static int sticky_clock_face_file(char *out, size_t out_len) {
-    time_t now = time(NULL);
-
+static int sticky_image_file(int bedtime, char *out, size_t out_len) {
     if (!out || out_len == 0) return -1;
     out[0] = '\0';
 
-    if (g_clock_face_cached[0] && now < g_clock_face_next_change) {
-        uint8_t test[MP_FACE_RAW_BYTES];
-        if (load_face_raw_by_file(g_clock_face_cached, test, sizeof(test)) == 0) {
-            safe_str(out, out_len, g_clock_face_cached);
+    time_t now = time(NULL);
+    struct rotating_image_state *state = &g_rotating_images[bedtime ? 1 : 0];
+
+    if (state->file[0] && now < state->next_change) {
+        uint8_t test[MP_IMAGE_RAW_BYTES];
+        if (load_image_raw_cached_by_file(state->file, bedtime, test, sizeof(test)) == 0) {
+            safe_str(out, out_len, state->file);
             return 0;
         }
     }
 
-    if (random_uploaded_face_file(g_clock_face_cached, sizeof(g_clock_face_cached)) == 0) {
-        g_clock_face_next_change = now + (rand() % (CLOCK_FACE_CHANGE_MAX_SECONDS + 1));
-        safe_str(out, out_len, g_clock_face_cached);
+    if (random_image_file(bedtime, state->file, sizeof(state->file)) == 0) {
+        state->next_change = now + (bedtime
+            ? BEDTIME_IMAGE_CHANGE_SECONDS
+            : rand() % (CLOCK_IMAGE_CHANGE_MAX_SECONDS + 1));
+        safe_str(out, out_len, state->file);
         return 0;
     }
 
-    g_clock_face_cached[0] = '\0';
-    g_clock_face_next_change = now + 60;
+    state->file[0] = '\0';
+    state->next_change = now + 60;
     return -1;
 }
 
-static int sticky_bedtime_face_file(char *out, size_t out_len) {
-    time_t now = time(NULL);
-
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
-
-    if (g_bedtime_face_cached[0] && now < g_bedtime_face_next_change) {
-        uint8_t test[MP_FACE_RAW_BYTES];
-        if (load_bedtime_face_raw_by_file(g_bedtime_face_cached, test, sizeof(test)) == 0) {
-            safe_str(out, out_len, g_bedtime_face_cached);
-            return 0;
-        }
-    }
-
-    if (random_bedtime_face_file(g_bedtime_face_cached, sizeof(g_bedtime_face_cached)) == 0) {
-        g_bedtime_face_next_change = now + BEDTIME_FACE_CHANGE_SECONDS;
-        safe_str(out, out_len, g_bedtime_face_cached);
-        return 0;
-    }
-
-    g_bedtime_face_cached[0] = '\0';
-    g_bedtime_face_next_change = now + 60;
-    return -1;
+static int clock_image_refresh_due(void) {
+    int bedtime = is_bedtime_now();
+    return time(NULL) >= g_rotating_images[bedtime ? 1 : 0].next_change;
 }
 
-static int clock_face_refresh_due(void) {
-    time_t now = time(NULL);
-    if (is_bedtime_now()) return now >= g_bedtime_face_next_change;
-    return now >= g_clock_face_next_change;
-}
-
-static int draw_face_thumb_raw(const uint8_t *raw, int ox, int oy, int size) {
+static int draw_image_thumb_raw(const uint8_t *raw, int ox, int oy, int size) {
     if (!raw || size <= 0) return -1;
 
     for (int y = 0; y < size; y++) {
-        int sy = (y * MP_FACE_HEIGHT) / size;
+        int sy = (y * MP_IMAGE_HEIGHT) / size;
         for (int x = 0; x < size; x++) {
-            int sx = (x * MP_FACE_WIDTH) / size;
-            oled_set_px(ox + x, oy + y, (uint8_t)face_raw_pixel(raw, sx, sy));
+            int sx = (x * MP_IMAGE_WIDTH) / size;
+            oled_set_px(ox + x, oy + y, (uint8_t)image_raw_pixel(raw, sx, sy));
         }
     }
 
     return 0;
 }
 
-static int draw_face_thumb_by_file(const char *file, int ox, int oy, int size) {
-    uint8_t raw[MP_FACE_RAW_BYTES];
-    if (load_face_raw_by_file(file, raw, sizeof(raw)) != 0) return -1;
-    return draw_face_thumb_raw(raw, ox, oy, size);
+static int draw_image_thumb_by_file(const char *file, int bedtime, int ox, int oy, int size) {
+    uint8_t raw[MP_IMAGE_RAW_BYTES];
+    if (load_image_raw_cached_by_file(file, bedtime, raw, sizeof(raw)) != 0) return -1;
+    return draw_image_thumb_raw(raw, ox, oy, size);
 }
 
-static int draw_bedtime_face_thumb_by_file(const char *file, int ox, int oy, int size) {
-    uint8_t raw[MP_FACE_RAW_BYTES];
-    if (load_bedtime_face_raw_by_file(file, raw, sizeof(raw)) != 0) return -1;
-    return draw_face_thumb_raw(raw, ox, oy, size);
+static void refresh_story_collage(void) {
+    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    int count = collect_image_files(1, files, ASSET_LIST_MAX_FILES);
+    memset(&g_story_collage, 0, sizeof(g_story_collage));
+    if (count <= 0) return;
+
+    int indices[ASSET_LIST_MAX_FILES];
+    for (int i = 0; i < count; i++) indices[i] = i;
+    for (int i = count - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        int tmp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = tmp;
+    }
+
+    g_story_collage.count = count < STORY_COLLAGE_MAX_IMAGES ? count : STORY_COLLAGE_MAX_IMAGES;
+    for (int i = 0; i < g_story_collage.count; i++)
+        safe_str(g_story_collage.files[i], sizeof(g_story_collage.files[i]), files[indices[i]]);
+}
+
+static int story_display_phase(void) {
+    uint64_t now_ms = monotonic_millis();
+    int phase = 0;
+    pthread_mutex_lock(&g_state.lock);
+    /* Keep the Story Mode intro visible for its full window even if the
+       audio thread exits very quickly during startup. Without this, a failed
+       or fast audio startup can make the OLED/browser preview look like it
+       only flashed instead of showing the configured intro message. */
+    if (now_ms < g_state.story_intro_until_ms) phase = 1;
+    else if (g_state.story_playing && now_ms < g_state.story_title_until_ms) phase = 2;
+    pthread_mutex_unlock(&g_state.lock);
+    return phase;
+}
+
+static int story_touch_input_locked(uint64_t now_ms) {
+    int locked;
+    pthread_mutex_lock(&g_state.lock);
+    locked = g_state.story_playing && now_ms < g_state.story_title_until_ms;
+    pthread_mutex_unlock(&g_state.lock);
+    return locked;
+}
+
+static void draw_story_mode_screen(const char *message) {
+    oled_clear_fb(0);
+
+    int count = g_story_collage.count;
+    if (count > 0) {
+        int gap = 3;
+        int total_w = count * STORY_COLLAGE_IMAGE_SIZE + (count - 1) * gap;
+        int x = (OLED_W - total_w) / 2;
+        int y = 2;
+        for (int i = 0; i < count; i++) {
+            (void)draw_image_thumb_by_file(g_story_collage.files[i], 1, x, y,
+                                           STORY_COLLAGE_IMAGE_SIZE);
+            x += STORY_COLLAGE_IMAGE_SIZE + gap;
+        }
+    } else {
+        const char *missing = "NO BEDTIME IMAGES";
+        int missing_w = text5x7_width(missing, 1);
+        draw_text5x7((OLED_W - missing_w) / 2, 25, 1, missing, 8);
+    }
+
+    oled_fill_rect(0, OLED_H - CLOCK_STATUS_PILL_H, OLED_W, CLOCK_STATUS_PILL_H, 0);
+    char text[STORY_MESSAGE_MAX];
+    safe_str(text, sizeof(text), message && *message ? message : "STORY MODE!");
+    for (size_t i = 0; text[i]; i++) text[i] = (char)toupper((unsigned char)text[i]);
+    int width = text5x7_width(text, 1);
+    int x = (OLED_W - width) / 2;
+    if (x < 0) x = 0;
+    draw_text5x7(x, OLED_H - 8, 1, text, 12);
+    oled_flush_full();
 }
 
 static void draw_clock_screen(void) {
@@ -2249,7 +2850,7 @@ static void draw_clock_screen(void) {
     int raw_hour = tmv.tm_hour;
     int minute = tmv.tm_min;
     int clock_24h_mode = 0;
-    int hour = raw_hour;
+    int hour;
 
     pthread_mutex_lock(&g_state.lock);
     int alarm_on = 0;
@@ -2264,19 +2865,28 @@ static void draw_clock_screen(void) {
     int alarm_volume_percent = g_state.alarm_volume_percent;
     int audio_playing = g_state.audio_playing;
     int show_song_metadata = g_state.show_song_metadata;
+    int story_playing = g_state.story_playing;
+    uint64_t story_intro_until_ms = g_state.story_intro_until_ms;
+    uint64_t story_title_until_ms = g_state.story_title_until_ms;
+    char story_message[STORY_MESSAGE_MAX];
+    safe_str(story_message, sizeof(story_message), g_state.story_message);
     uint64_t audio_scroll_started_ms = g_state.audio_scroll_started_ms;
     char audio_display[SONG_METADATA_TEXT_MAX];
     safe_str(audio_display, sizeof(audio_display), g_state.audio_display);
     clock_24h_mode = g_state.clock_24h_mode;
-    char preview_face_file[FACE_FILE_MAX];
-    int preview_face_bedtime = g_state.preview_face_bedtime;
-    time_t preview_face_until = g_state.preview_face_until;
-    safe_str(preview_face_file, sizeof(preview_face_file), g_state.preview_face_file);
     char oled_font_file[128];
     int oled_font_size = g_state.oled_font_size;
     int clock_font_size = clamp_int(oled_font_size, 18, 54);
     safe_str(oled_font_file, sizeof(oled_font_file), g_state.oled_font_file);
     pthread_mutex_unlock(&g_state.lock);
+
+    uint64_t display_now_ms = monotonic_millis();
+    if (display_now_ms < story_intro_until_ms) {
+        draw_story_mode_screen(story_message);
+        return;
+    }
+    if (story_playing)
+        show_song_metadata = display_now_ms < story_title_until_ms;
 
     if (!clock_24h_mode) {
         hour = raw_hour;
@@ -2295,32 +2905,22 @@ static void draw_clock_screen(void) {
     uint8_t colon_level = clock_colon_blink_level();
 
     int bedtime = is_bedtime_now();
-    int face_x = CLOCK_SIDE_WIDGET_X;
-    /* Keep the face visually centered in the usable area above the bottom status pills.
-       The small negative nudge compensates for most face art having more visual weight
+    int image_x = CLOCK_SIDE_WIDGET_X;
+    /* Keep the image visually centered in the usable area above the bottom status pills.
+       The small negative nudge compensates for most image art having more visual weight
        in the lower half. */
-    int face_area_h = OLED_H - CLOCK_STATUS_PILL_H;
-    int face_y = ((face_area_h - CLOCK_SIDE_WIDGET_SIZE) / 2) + CLOCK_FACE_Y_NUDGE;
-    int face_right = face_x + CLOCK_SIDE_WIDGET_SIZE;
-    int clock_center_x = (face_right + OLED_W) / 2;
-    char random_face_file[FACE_FILE_MAX];
-    time_t now_ts = time(NULL);
-    if (preview_face_file[0] && now_ts < preview_face_until) {
-        if (preview_face_bedtime) draw_bedtime_face_thumb_by_file(preview_face_file, face_x, face_y, CLOCK_SIDE_WIDGET_SIZE);
-        else draw_face_thumb_by_file(preview_face_file, face_x, face_y, CLOCK_SIDE_WIDGET_SIZE);
-    } else if (preview_face_file[0] && now_ts >= preview_face_until) {
-        pthread_mutex_lock(&g_state.lock);
-        g_state.preview_face_file[0] = '\0';
-        g_state.preview_face_until = 0;
-        g_state.preview_face_bedtime = 0;
-        pthread_mutex_unlock(&g_state.lock);
-    } else if (bedtime) {
-        if (sticky_bedtime_face_file(random_face_file, sizeof(random_face_file)) == 0) {
-            draw_bedtime_face_thumb_by_file(random_face_file, face_x, face_y, CLOCK_SIDE_WIDGET_SIZE);
+    int image_area_h = OLED_H - CLOCK_STATUS_PILL_H;
+    int image_y = ((image_area_h - CLOCK_SIDE_WIDGET_SIZE) / 2) + CLOCK_IMAGE_Y_NUDGE;
+    int image_right = image_x + CLOCK_SIDE_WIDGET_SIZE;
+    int clock_center_x = (image_right + OLED_W) / 2;
+    char random_image_file[IMAGE_FILE_MAX];
+    if (bedtime) {
+        if (sticky_image_file(1, random_image_file, sizeof(random_image_file)) == 0) {
+            draw_image_thumb_by_file(random_image_file, 1, image_x, image_y, CLOCK_SIDE_WIDGET_SIZE);
         }
     } else {
-        if (sticky_clock_face_file(random_face_file, sizeof(random_face_file)) == 0) {
-            draw_face_thumb_by_file(random_face_file, face_x, face_y, CLOCK_SIDE_WIDGET_SIZE);
+        if (sticky_image_file(0, random_image_file, sizeof(random_image_file)) == 0) {
+            draw_image_thumb_by_file(random_image_file, 0, image_x, image_y, CLOCK_SIDE_WIDGET_SIZE);
         }
     }
 
@@ -2376,42 +2976,19 @@ static void draw_clock_screen(void) {
 
     draw_clock_footer_contents(&tmv, clock_center_x, alarm_on, alarm_active,
                                alarm_volume_percent, audio_playing, show_song_metadata,
-                               audio_display, audio_scroll_started_ms);
+                               story_playing, audio_display, audio_scroll_started_ms);
 
     /*
-       The clock screen contains a 54x54 face beside the time, a blinking colon, bottom-left Wi-Fi/alarm status group. On SSD1322 modules,
+       The clock screen contains a 54x54 image beside the time, a blinking colon, bottom-left Wi-Fi/alarm status group. On SSD1322 modules,
        small partial updates around packed 4-bit graphics can occasionally leave
        edge noise, so a full flush is the cleaner and safer choice.
     */
 oled_flush_full();
 }
 
-static int draw_face_screen_file(const char *file) {
-    uint8_t raw[MP_FACE_RAW_BYTES];
-    if (load_face_raw_by_file(file, raw, sizeof(raw)) != 0) return -1;
 
-    oled_clear_fb(0);
-    int ox = 96;
-    int oy = 0;
-    for (int y = 0; y < MP_FACE_HEIGHT; y++) {
-        for (int x = 0; x < MP_FACE_WIDTH; x += 2) {
-            uint8_t b = raw[(y * MP_FACE_WIDTH + x) / 2];
-            oled_set_px(ox + x, oy + y, (b >> 4) & 0x0F);
-            oled_set_px(ox + x + 1, oy + y, b & 0x0F);
-        }
-    }
-    oled_flush();
-    return 0;
-}
-
-static int draw_face_screen(int id) {
-    char file[FACE_FILE_MAX];
-    snprintf(file, sizeof(file), "face_%03d.raw", id);
-    return draw_face_screen_file(file);
-}
-
-static void sanitize_message_text(char *s) {
-    if (!s) return;
+static void sanitize_message_text(char *s, size_t s_len) {
+    if (!s || s_len == 0) return;
 
     char out[192];
     size_t j = 0;
@@ -2433,66 +3010,64 @@ static void sanitize_message_text(char *s) {
 
     while (j > 0 && out[j - 1] == ' ') j--;
     out[j] = '\0';
-    safe_str(s, 192, out);
+    safe_str(s, s_len, out);
 }
 
-static int measure_ttf_line_locked(FT_Face face, const char *text) {
-    if (!face || !text || !*text) return 0;
+struct ttf_line_metrics {
+    int min_x;
+    int width;
+    int ascent;
+    int descent;
+};
+
+static int measure_ttf_line_locked(FT_Face face, const char *text, struct ttf_line_metrics *metrics) {
+    if (!face || !text || !*text || !metrics) return -1;
 
     int pen_x = 0;
     int min_x = 99999;
     int max_x = -99999;
+    int ascent = 0;
+    int descent = 0;
 
     for (const unsigned char *ch = (const unsigned char *)text; *ch; ch++) {
         if (FT_Load_Char(face, *ch, FT_LOAD_RENDER) != 0) continue;
-        FT_GlyphSlot g = face->glyph;
-        int gx0 = (pen_x >> 6) + g->bitmap_left;
-        int gx1 = gx0 + (int)g->bitmap.width;
+        FT_GlyphSlot glyph = face->glyph;
+        int gx0 = (pen_x >> 6) + glyph->bitmap_left;
+        int gx1 = gx0 + (int)glyph->bitmap.width;
+        int bottom = (int)glyph->bitmap.rows - glyph->bitmap_top;
         if (gx0 < min_x) min_x = gx0;
         if (gx1 > max_x) max_x = gx1;
-        pen_x += (int)g->advance.x;
+        if (glyph->bitmap_top > ascent) ascent = glyph->bitmap_top;
+        if (bottom > descent) descent = bottom;
+        pen_x += (int)glyph->advance.x;
     }
 
-    return max_x > min_x ? max_x - min_x : (pen_x >> 6);
+    if (min_x == 99999) return -1;
+    metrics->min_x = min_x;
+    metrics->width = max_x > min_x ? max_x - min_x : (pen_x >> 6);
+    metrics->ascent = ascent;
+    metrics->descent = descent > 0 ? descent : 0;
+    return 0;
 }
 
-
-static int ttf_message_metrics_cached(const char *font_file, int px_size, int *ascent, int *descent) {
-    if (ascent) *ascent = 0;
-    if (descent) *descent = 0;
-    if (!font_file || !*font_file) return -1;
+static int with_ttf_line_metrics(const char *font_file, int px_size, const char *text,
+                                 struct ttf_line_metrics *metrics) {
+    if (!font_file || !*font_file || !text || !*text || !metrics) return -1;
 
     char font_path[512];
     make_font_path(font_file, font_path, sizeof(font_path));
 
     pthread_mutex_lock(&g_font.lock);
-    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_font.face) {
-        pthread_mutex_unlock(&g_font.lock);
-        return -1;
-    }
-
-    FT_Face face = g_font.face;
-    int a = 0;
-    int d = 0;
-    const char *sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:;!?()-_";
-    for (const unsigned char *ch = (const unsigned char *)sample; *ch; ch++) {
-        if (FT_Load_Char(face, *ch, FT_LOAD_RENDER) != 0) continue;
-        FT_GlyphSlot g = face->glyph;
-        int top = g->bitmap_top;
-        int bottom = (int)g->bitmap.rows - g->bitmap_top;
-        if (top > a) a = top;
-        if (bottom > d) d = bottom;
-    }
+    int rc = font_cache_ensure_locked(font_file, font_path, px_size) == 0 && g_font.face
+        ? measure_ttf_line_locked(g_font.face, text, metrics)
+        : -1;
     pthread_mutex_unlock(&g_font.lock);
-
-    if (a <= 0) a = px_size;
-    if (d < 0) d = 0;
-    if (ascent) *ascent = a;
-    if (descent) *descent = d;
-    return 0;
+    return rc;
 }
 
-static int draw_truetype_line_cached_baseline(const char *font_file, int px_size, const char *text, int x, int baseline_y) {
+static int draw_truetype_line_cached_baseline(const char *font_file, int px_size,
+                                              const char *text, int min_x,
+                                              int x, int baseline_y) {
     if (!font_file || !*font_file || !text || !*text) return -1;
 
     char font_path[512];
@@ -2505,64 +3080,39 @@ static int draw_truetype_line_cached_baseline(const char *font_file, int px_size
     }
 
     FT_Face face = g_font.face;
-    int pen_x = 0;
-    int min_x = 99999;
-
-    for (const unsigned char *ch = (const unsigned char *)text; *ch; ch++) {
-        if (FT_Load_Char(face, *ch, FT_LOAD_RENDER) != 0) continue;
-        FT_GlyphSlot g = face->glyph;
-        int gx0 = (pen_x >> 6) + g->bitmap_left;
-        if (gx0 < min_x) min_x = gx0;
-        pen_x += (int)g->advance.x;
-    }
-
-    if (min_x == 99999) {
-        pthread_mutex_unlock(&g_font.lock);
-        return -1;
-    }
-
     int origin_x = x - min_x;
-    pen_x = 0;
+    int pen_x = 0;
+    int drew = 0;
     for (const unsigned char *ch = (const unsigned char *)text; *ch; ch++) {
         if (FT_Load_Char(face, *ch, FT_LOAD_RENDER) != 0) continue;
-        FT_GlyphSlot g = face->glyph;
-        FT_Bitmap *bm = &g->bitmap;
-        int gx = origin_x + (pen_x >> 6) + g->bitmap_left;
-        int gy = baseline_y - g->bitmap_top;
+        FT_GlyphSlot glyph = face->glyph;
+        drew = 1;
+        FT_Bitmap *bitmap = &glyph->bitmap;
+        int gx = origin_x + (pen_x >> 6) + glyph->bitmap_left;
+        int gy = baseline_y - glyph->bitmap_top;
 
-        for (unsigned int row = 0; row < bm->rows; row++) {
-            for (unsigned int col = 0; col < bm->width; col++) {
+        for (unsigned int row = 0; row < bitmap->rows; row++) {
+            for (unsigned int col = 0; col < bitmap->width; col++) {
                 uint8_t coverage = 0;
-                if (bm->pixel_mode == FT_PIXEL_MODE_GRAY) {
-                    coverage = bm->buffer[row * bm->pitch + col];
-                } else if (bm->pixel_mode == FT_PIXEL_MODE_MONO) {
-                    uint8_t byte = bm->buffer[row * bm->pitch + (col >> 3)];
+                if (bitmap->pixel_mode == FT_PIXEL_MODE_GRAY) {
+                    coverage = bitmap->buffer[row * bitmap->pitch + col];
+                } else if (bitmap->pixel_mode == FT_PIXEL_MODE_MONO) {
+                    uint8_t byte = bitmap->buffer[row * bitmap->pitch + (col >> 3)];
                     coverage = (byte & (0x80 >> (col & 7))) ? 255 : 0;
                 }
                 oled_blend_px(gx + (int)col, gy + (int)row, coverage, 15);
             }
         }
-        pen_x += (int)g->advance.x;
+        pen_x += (int)glyph->advance.x;
     }
 
     pthread_mutex_unlock(&g_font.lock);
-    return 0;
+    return drew ? 0 : -1;
 }
 
 static int ttf_line_width_cached(const char *font_file, int px_size, const char *text) {
-    if (!font_file || !*font_file || !text || !*text) return 0;
-
-    char font_path[512];
-    make_font_path(font_file, font_path, sizeof(font_path));
-
-    pthread_mutex_lock(&g_font.lock);
-    if (font_cache_ensure_locked(font_file, font_path, px_size) != 0 || !g_font.face) {
-        pthread_mutex_unlock(&g_font.lock);
-        return 0;
-    }
-    int w = measure_ttf_line_locked(g_font.face, text);
-    pthread_mutex_unlock(&g_font.lock);
-    return w;
+    struct ttf_line_metrics metrics;
+    return with_ttf_line_metrics(font_file, px_size, text, &metrics) == 0 ? metrics.width : 0;
 }
 
 static int message_line_width(const char *font_file, int px_size, const char *text, int scale) {
@@ -2619,29 +3169,6 @@ static int message_layout_params(char *font_file, size_t font_file_len, int *px_
     return 0;
 }
 
-static int message_char_capacity_for_current_font(void) {
-    char font_file[128];
-    int px_size = 18;
-    int scale = MESSAGE_FALLBACK_SCALE;
-    int use_ttf = 0;
-    message_layout_params(font_file, sizeof(font_file), &px_size, &scale, &use_ttf);
-
-    int widest = 0;
-    const char *sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    char one[2] = {0, 0};
-    for (const char *p = sample; *p; p++) {
-        one[0] = *p;
-        int w = message_line_width(use_ttf ? font_file : "", px_size, one, scale);
-        if (w > widest) widest = w;
-    }
-    if (widest <= 0) widest = 12;
-
-    int per_line = MESSAGE_TEXT_W / widest;
-    if (per_line < 6) per_line = 6;
-
-    return per_line * MESSAGE_MAX_LINES;
-}
-
 static int message_fits_display(const char *message, char *reason, size_t reason_len) {
     if (reason && reason_len > 0) reason[0] = '\0';
     if (!message || !*message) return 1;
@@ -2696,9 +3223,9 @@ static int message_fits_display(const char *message, char *reason, size_t reason
     return 1;
 }
 
-static int draw_message_screen_file(const char *face_file, const char *message) {
-    if (!safe_face_filename(face_file)) face_file = "";
-    if (!message || !*message) message = "Hello";
+static int render_message_screen_file(const char *image_file, int image_bedtime, const char *message, int flush_to_oled) {
+    if (!safe_image_filename(image_file)) image_file = "";
+    if (!message) message = "";
 
     pthread_mutex_lock(&g_state.lock);
     char font_file[128];
@@ -2708,9 +3235,18 @@ static int draw_message_screen_file(const char *face_file, const char *message) 
 
     oled_clear_fb(0);
 
-    /* Full 64x64 face at left; text gets the remaining 188 px. */
-    if (!face_file[0] || draw_face_thumb_by_file(face_file, 0, 0, 64) != 0) {
-        draw_text5x7(8, 27, 1, "NO FACE", 8);
+    if (!message[0]) {
+        if (!image_file[0] ||
+            draw_image_thumb_by_file(image_file, image_bedtime ? 1 : 0, 0, 0, 64) != 0) {
+            draw_text5x7(8, 27, 1, "NO IMAGE", 8);
+        }
+        if (flush_to_oled) oled_flush_full();
+        return 0;
+    }
+
+    /* Full 64x64 image at left; text uses x=70..251, leaving a 6 px gap and 4 px right margin. */
+    if (!image_file[0] || draw_image_thumb_by_file(image_file, image_bedtime ? 1 : 0, 0, 0, 64) != 0) {
+        draw_text5x7(8, 27, 1, "NO IMAGE", 8);
     }
 
     const int text_x = MESSAGE_TEXT_X;
@@ -2725,46 +3261,61 @@ static int draw_message_screen_file(const char *face_file, const char *message) 
 
     int scale = MESSAGE_FALLBACK_SCALE;
     int use_ttf = font_file[0] != '\0';
-    int line_h = use_ttf ? (ttf_px + 2) : (7 * scale + 3);
     int n = wrap_message_lines(use_ttf ? font_file : "", ttf_px, message, text_w, lines, max_lines, scale);
     if (n <= 0) {
         safe_str(lines[0], sizeof(lines[0]), "Hello");
         n = 1;
     }
 
-    int ascent = ttf_px;
-    int descent = 0;
-    if (use_ttf) {
-        ttf_message_metrics_cached(font_file, ttf_px, &ascent, &descent);
-        int min_line_h = ascent + descent + 2;
-        if (line_h < min_line_h) line_h = min_line_h;
-    }
-
-    int total_h = n * line_h - 2;
-    int y = (OLED_H - total_h) / 2;
-    if (y < 0) y = 0;
+    struct ttf_line_metrics layout[MESSAGE_MAX_LINES];
+    memset(layout, 0, sizeof(layout));
+    const int line_gap = use_ttf ? 2 : 3;
+    int total_h = line_gap * (n - 1);
 
     for (int i = 0; i < n; i++) {
-        int line_y = y + i * line_h;
-        if (use_ttf) {
-            int baseline_y = line_y + ascent;
-            if (draw_truetype_line_cached_baseline(font_file, ttf_px, lines[i], text_x, baseline_y) != 0) {
-                draw_text5x7(text_x, line_y, 1, lines[i], 15);
-            }
+        if (use_ttf && with_ttf_line_metrics(font_file, ttf_px, lines[i], &layout[i]) == 0) {
+            if (layout[i].ascent <= 0) layout[i].ascent = ttf_px;
         } else {
-            draw_text5x7(text_x, line_y, scale, lines[i], 15);
+            int fallback_scale = use_ttf ? 1 : scale;
+            layout[i].width = text5x7_width(lines[i], fallback_scale);
+            layout[i].ascent = 7 * fallback_scale;
+            layout[i].descent = 0;
         }
+        total_h += layout[i].ascent + layout[i].descent;
     }
 
-    oled_flush_full();
+    int line_y = (OLED_H - total_h) / 2;
+    if (line_y < 0) line_y = 0;
+
+    for (int i = 0; i < n; i++) {
+        int line_x = text_x + (text_w - layout[i].width) / 2;
+        if (line_x < text_x) line_x = text_x;
+
+        if (use_ttf) {
+            int baseline_y = line_y + layout[i].ascent;
+            if (draw_truetype_line_cached_baseline(font_file, ttf_px, lines[i],
+                                                   layout[i].min_x, line_x, baseline_y) != 0) {
+                int fallback_w = text5x7_width(lines[i], 1);
+                int fallback_x = text_x + (text_w - fallback_w) / 2;
+                if (fallback_x < text_x) fallback_x = text_x;
+                draw_text5x7(fallback_x, line_y, 1, lines[i], 15);
+            }
+        } else {
+            draw_text5x7(line_x, line_y, scale, lines[i], 15);
+        }
+
+        line_y += layout[i].ascent + layout[i].descent + line_gap;
+    }
+
+    if (flush_to_oled) oled_flush_full();
     return 0;
 }
 
-static int draw_message_screen(int face_id, const char *message) {
-    char file[FACE_FILE_MAX];
-    snprintf(file, sizeof(file), "face_%03d.raw", face_id_valid_int(face_id) ? face_id : 1);
-    return draw_message_screen_file(file, message);
+
+static int draw_message_screen_file(const char *image_file, int image_bedtime, const char *message) {
+    return render_message_screen_file(image_file, image_bedtime, message, 1);
 }
+
 
 /* ---------------- Audio ---------------- */
 
@@ -2773,24 +3324,100 @@ struct audio_play_request {
     char file[MUSIC_FILE_MAX];
     int start_volume;
     int end_volume;
-    int use_ramp;
+    int alarm_mode;
+    int notification_mode;
 };
 
-static int choose_random_music_file(char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
-    out[0] = '\0';
+static void oled_filter_metadata_text(const char *input, char *output, size_t output_len) {
+    if (!output || output_len == 0) return;
+    output[0] = '\0';
+    if (!input || !*input) return;
 
-    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-    int count = collect_music_files(files, ASSET_LIST_MAX_FILES);
-    if (count <= 0) return -1;
+    const unsigned char *cursor = (const unsigned char *)input;
+    size_t used = 0;
+    int previous_was_space = 1;
 
-    safe_str(out, out_len, files[rand() % count]);
-    return 0;
+    while (*cursor) {
+        const unsigned char *start = cursor;
+        uint32_t cp = utf8_next_codepoint(&cursor);
+
+        /* Combining marks have no standalone glyph and should not create gaps. */
+        if (cp >= 0x0300 && cp <= 0x036f) continue;
+
+        /* Unsupported code points would render as the fallback question mark. */
+        if (font5x7_glyph(cp) == font5x7_unknown) continue;
+
+        if (cp == ' ' || cp == 0x00a0) {
+            if (previous_was_space) continue;
+            if (used + 1 >= output_len) break;
+            output[used++] = ' ';
+            previous_was_space = 1;
+            continue;
+        }
+
+        size_t bytes = (size_t)(cursor - start);
+        if (bytes == 0 || used + bytes >= output_len) break;
+        memcpy(output + used, start, bytes);
+        used += bytes;
+        previous_was_space = 0;
+    }
+
+    while (used > 0 && output[used - 1] == ' ') used--;
+    output[used] = '\0';
+}
+
+static void song_metadata_for_file(const char *path, const char *file,
+                                   char *title, size_t title_len,
+                                   char *artist, size_t artist_len,
+                                   char *display, size_t display_len) {
+    struct mp_id3_metadata metadata;
+    memset(&metadata, 0, sizeof(metadata));
+    (void)mp_read_id3_metadata(path, &metadata);
+    if (!metadata.title[0]) mp_title_from_filename(file, metadata.title, sizeof(metadata.title));
+    safe_str(title, title_len, metadata.title);
+    safe_str(artist, artist_len, metadata.artist);
+
+    char oled_title[MP_ID3_TEXT_MAX];
+    char oled_artist[MP_ID3_TEXT_MAX];
+    oled_filter_metadata_text(metadata.title, oled_title, sizeof(oled_title));
+    oled_filter_metadata_text(metadata.artist, oled_artist, sizeof(oled_artist));
+
+    char combined[MP_ID3_TEXT_MAX * 2 + 4];
+    if (oled_title[0] && oled_artist[0])
+        snprintf(combined, sizeof(combined), "%s - %s", oled_title, oled_artist);
+    else if (oled_title[0])
+        safe_str(combined, sizeof(combined), oled_title);
+    else if (oled_artist[0])
+        safe_str(combined, sizeof(combined), oled_artist);
+    else
+        safe_str(combined, sizeof(combined), "NOW PLAYING");
+    safe_str(display, display_len, combined);
+}
+
+static void clear_audio_metadata_locked(void) {
+    g_state.audio_title[0] = '\0';
+    g_state.audio_artist[0] = '\0';
+    g_state.audio_display[0] = '\0';
+    g_state.audio_scroll_started_ms = 0;
+}
+
+static int audio_is_alarm_session(void) {
+    int alarm_mode;
+    pthread_mutex_lock(&g_audio.lock);
+    alarm_mode = g_audio.running && g_audio.alarm_mode;
+    pthread_mutex_unlock(&g_audio.lock);
+    return alarm_mode;
 }
 
 static int audio_should_stop(void) {
     int stop;
+    uint64_t now_ms = monotonic_millis();
     pthread_mutex_lock(&g_audio.lock);
+    if (!g_audio.stop_requested && g_audio.alarm_mode && g_audio.alarm_deadline_ms > 0 &&
+        now_ms >= g_audio.alarm_deadline_ms) {
+        g_audio.stop_requested = 1;
+        g_audio.timed_out = 1;
+    }
     stop = g_audio.stop_requested;
     pthread_mutex_unlock(&g_audio.lock);
     return stop;
@@ -2855,7 +3482,55 @@ static int audio_write_pcm(snd_pcm_t *pcm, unsigned char *buf, size_t bytes, int
     return 0;
 }
 
-static void clear_audio_metadata_locked(void);
+static int audio_file_playable(const char *path) {
+    int err = MPG123_OK;
+    mpg123_handle *mh = mpg123_new(NULL, &err);
+    if (!mh) return 0;
+    mpg123_param(mh, MPG123_ADD_FLAGS, MPG123_QUIET, 0.0);
+    int ok = 0;
+    if (mpg123_open(mh, path) == MPG123_OK) {
+        long rate = 0;
+        int channels = 0;
+        int enc = 0;
+        if (mpg123_getformat(mh, &rate, &channels, &enc) == MPG123_OK &&
+            rate > 0 && channels >= 1 && channels <= 2) ok = 1;
+        mpg123_close(mh);
+    }
+    mpg123_delete(mh);
+    return ok;
+}
+
+static int choose_playable_library(const char *dir, const char *requested,
+                                   char *file, size_t file_len,
+                                   char *path, size_t path_len) {
+    if (!dir || !*dir || !file || !path || file_len == 0 || path_len == 0) return -1;
+    if (requested && *requested && safe_asset_filename(requested) && has_mp3_ext(requested)) {
+        safe_str(file, file_len, requested);
+        int n = snprintf(path, path_len, "%s/%s", dir, file);
+        if (n > 0 && (size_t)n < path_len && access(path, R_OK) == 0 && audio_file_playable(path)) return 0;
+    }
+
+    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    int count = scan_asset_files(dir, ASSET_LIST_MUSIC_MP3, files, ASSET_LIST_MAX_FILES);
+    if (count <= 0) return -1;
+    int first = rand() % count;
+    for (int offset = 0; offset < count; offset++) {
+        safe_str(file, file_len, files[(first + offset) % count]);
+        int n = snprintf(path, path_len, "%s/%s", dir, file);
+        if (n > 0 && (size_t)n < path_len && access(path, R_OK) == 0 && audio_file_playable(path)) return 0;
+    }
+    return -1;
+}
+
+static int choose_playable_uploaded_music(const char *requested, char *file, size_t file_len,
+                                          char *path, size_t path_len) {
+    return choose_playable_library(MUSIC_DIR, requested, file, file_len, path, path_len);
+}
+
+static int choose_playable_story(const char *requested, char *file, size_t file_len,
+                                 char *path, size_t path_len) {
+    return choose_playable_library(STORY_DIR, requested, file, file_len, path, path_len);
+}
 
 static void *audio_thread_main(void *arg) {
     struct audio_play_request *req = (struct audio_play_request *)arg;
@@ -2867,16 +3542,13 @@ static void *audio_thread_main(void *arg) {
     int channels = 0;
     int enc = 0;
     off_t total_samples = 0;
-    off_t played_samples = 0;
     double ramp_seconds = 0.0;
     struct timespec ramp_start_ts;
     memset(&ramp_start_ts, 0, sizeof(ramp_start_ts));
 
     mh = mpg123_new(NULL, &err);
     if (!mh) goto done;
-
     mpg123_param(mh, MPG123_ADD_FLAGS, MPG123_QUIET, 0.0);
-
     if (mpg123_open(mh, req->path) != MPG123_OK) goto done;
     if (mpg123_getformat(mh, &rate, &channels, &enc) != MPG123_OK) goto done;
     if (channels < 1 || channels > 2 || rate <= 0) goto done;
@@ -2884,34 +3556,17 @@ static void *audio_thread_main(void *arg) {
     mpg123_format_none(mh);
     mpg123_format(mh, rate, channels, MPG123_ENC_SIGNED_16);
 
-    /*
-       Scan once so VBR files get a useful sample length for the alarm ramp.
-       We compute seconds from decoded PCM frames, then ramp by real playback time.
-       That is more reliable than tying volume changes only to decoder position.
-    */
-    if (req->use_ramp) {
+    if (req->alarm_mode) {
         if (mpg123_scan(mh) == MPG123_OK) {
             total_samples = mpg123_length(mh);
-            mpg123_seek(mh, 0, SEEK_SET);
+            (void)mpg123_seek(mh, 0, SEEK_SET);
         } else {
             total_samples = mpg123_length(mh);
         }
-        if (total_samples < 0) total_samples = 0;
-        if (total_samples > 0 && rate > 0) {
-            ramp_seconds = (double)total_samples / (double)rate;
-        }
+        if (total_samples > 0 && rate > 0) ramp_seconds = (double)total_samples / (double)rate;
         if (ramp_seconds < 1.0) ramp_seconds = 60.0;
         clock_gettime(CLOCK_MONOTONIC, &ramp_start_ts);
         alarm_volume_state_set(1, req->start_volume);
-        fprintf(stderr,
-                "alarm ramp: file=%s start=%d end=%d duration=%.1fs alarm-volume-overrides-global\n",
-                req->file,
-                req->start_volume,
-                req->end_volume,
-                ramp_seconds);
-    } else {
-        total_samples = mpg123_length(mh);
-        if (total_samples < 0) total_samples = 0;
     }
 
     if (snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0) goto done;
@@ -2921,45 +3576,46 @@ static void *audio_thread_main(void *arg) {
                            (unsigned int)channels,
                            (unsigned int)rate,
                            1,
-                           300000) < 0) {
-        goto done;
-    }
+                           300000) < 0) goto done;
 
     const size_t buf_size = 8192;
     buf = malloc(buf_size);
     if (!buf) goto done;
 
+    if (req->alarm_mode) {
+        pthread_mutex_lock(&g_state.lock);
+        g_state.last_successful_alarm = (long long)time(NULL);
+        pthread_mutex_unlock(&g_state.lock);
+        save_config();
+        app_log("alarm", "Alarm audio started: %s; loops until touch or 30-minute limit", req->file);
+    }
+
     while (!audio_should_stop()) {
         size_t done_bytes = 0;
         int r = mpg123_read(mh, buf, buf_size, &done_bytes);
         if (done_bytes > 0) {
-            int frame_bytes = channels * (int)sizeof(int16_t);
-            off_t frames = (off_t)(done_bytes / (size_t)frame_bytes);
             int volume = req->start_volume;
-
-            if (req->use_ramp && ramp_seconds > 0.0) {
+            if (req->alarm_mode && ramp_seconds > 0.0) {
                 struct timespec now_ts;
                 clock_gettime(CLOCK_MONOTONIC, &now_ts);
                 double elapsed = (double)(now_ts.tv_sec - ramp_start_ts.tv_sec) +
                                  ((double)(now_ts.tv_nsec - ramp_start_ts.tv_nsec) / 1000000000.0);
                 if (elapsed < 0.0) elapsed = 0.0;
                 double t = elapsed / ramp_seconds;
-                if (t < 0.0) t = 0.0;
                 if (t > 1.0) t = 1.0;
-                volume = req->start_volume + (int)((double)(req->end_volume - req->start_volume) * t + 0.5);
-            } else if (req->use_ramp && total_samples > 0) {
-                off_t pos = played_samples;
-                if (pos < 0) pos = 0;
-                if (pos > total_samples) pos = total_samples;
-                volume = req->start_volume + (int)(((long long)(req->end_volume - req->start_volume) * (long long)pos) / (long long)total_samples);
+                volume = req->start_volume +
+                    (int)((double)(req->end_volume - req->start_volume) * t + 0.5);
+                alarm_volume_state_set(1, volume);
             }
-
-            if (req->use_ramp) alarm_volume_state_set(1, volume);
             audio_scale_s16(buf, done_bytes, volume);
             if (audio_write_pcm(pcm, buf, done_bytes, channels) != 0) break;
-            played_samples += frames;
         }
-        if (r == MPG123_DONE) break;
+        if (r == MPG123_DONE) {
+            if (req->alarm_mode && !audio_should_stop() && mpg123_seek(mh, 0, SEEK_SET) >= 0) {
+                continue;
+            }
+            break;
+        }
         if (r == MPG123_NEW_FORMAT) continue;
         if (r != MPG123_OK) break;
     }
@@ -2977,21 +3633,45 @@ done:
         mpg123_delete(mh);
     }
 
-    if (req->use_ramp) alarm_volume_state_set(0, 0);
+    int timed_out = 0;
+    pthread_mutex_lock(&g_audio.lock);
+    timed_out = g_audio.timed_out;
+    pthread_mutex_unlock(&g_audio.lock);
 
-    pthread_mutex_lock(&g_state.lock);
-    g_state.audio_playing = 0;
-    g_state.audio_file[0] = '\0';
-    clear_audio_metadata_locked();
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
+    if (req->alarm_mode) {
+        alarm_volume_state_set(0, 0);
+        if (timed_out) app_log("alarm", "Alarm stopped after the 30-minute safety limit");
+    }
 
-    /* Publish completion only after all old playback state is cleared.
-       A waiting replacement track can then start without the exiting thread
-       erasing the new track's metadata. */
+    if (!req->notification_mode) {
+        uint64_t ended_ms = monotonic_millis();
+        pthread_mutex_lock(&g_state.lock);
+        int was_story = g_state.story_playing;
+        uint64_t story_intro_until_ms = g_state.story_intro_until_ms;
+        g_state.audio_playing = 0;
+        g_state.audio_file[0] = '\0';
+        g_state.story_playing = 0;
+        if (was_story && ended_ms < story_intro_until_ms) {
+            /* Preserve the startup splash until its scheduled end. This prevents
+               a start-fail or immediate thread exit from wiping the Story Mode
+               text before the OLED loop has held it onscreen. */
+            g_state.story_title_until_ms = story_intro_until_ms;
+        } else {
+            g_state.story_intro_until_ms = 0;
+            g_state.story_title_until_ms = 0;
+        }
+        clear_audio_metadata_locked();
+        g_state.display_dirty = 1;
+        pthread_mutex_unlock(&g_state.lock);
+    }
+
     pthread_mutex_lock(&g_audio.lock);
     g_audio.running = 0;
     g_audio.stop_requested = 0;
+    g_audio.alarm_mode = 0;
+    g_audio.notification_mode = 0;
+    g_audio.timed_out = 0;
+    g_audio.alarm_deadline_ms = 0;
     g_audio.file[0] = '\0';
     pthread_cond_broadcast(&g_audio.stopped);
     pthread_mutex_unlock(&g_audio.lock);
@@ -3000,52 +3680,39 @@ done:
     return NULL;
 }
 
-static void song_metadata_for_file(const char *path, const char *file,
-                                   char *title, size_t title_len,
-                                   char *artist, size_t artist_len,
-                                   char *display, size_t display_len) {
-    struct mp_id3_metadata metadata;
-    memset(&metadata, 0, sizeof(metadata));
-    (void)mp_read_id3_metadata(path, &metadata);
-    if (!metadata.title[0]) mp_title_from_filename(file, metadata.title, sizeof(metadata.title));
-    safe_str(title, title_len, metadata.title);
-    safe_str(artist, artist_len, metadata.artist);
-
-    char combined[MP_ID3_TEXT_MAX * 2 + 4];
-    if (metadata.title[0] && metadata.artist[0])
-        snprintf(combined, sizeof(combined), "%s - %s", metadata.title, metadata.artist);
-    else if (metadata.title[0])
-        safe_str(combined, sizeof(combined), metadata.title);
-    else if (metadata.artist[0])
-        safe_str(combined, sizeof(combined), metadata.artist);
-    else
-        mp_title_from_filename(file, combined, sizeof(combined));
-    oled_ascii_text(combined, display, display_len);
-}
-
-static void clear_audio_metadata_locked(void) {
-    g_state.audio_title[0] = '\0';
-    g_state.audio_artist[0] = '\0';
-    g_state.audio_display[0] = '\0';
-    g_state.audio_scroll_started_ms = 0;
-}
-
 static void audio_clear_visible_state(void) {
     alarm_volume_state_set(0, 0);
-
     pthread_mutex_lock(&g_state.lock);
     g_state.audio_playing = 0;
     g_state.audio_file[0] = '\0';
+    g_state.story_playing = 0;
+    g_state.story_intro_until_ms = 0;
+    g_state.story_title_until_ms = 0;
     clear_audio_metadata_locked();
     g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
 }
 
-static void audio_request_stop(void) {
+static int audio_request_stop_internal(int allow_alarm) {
+    int requested = 0;
+    int notification_mode = 0;
     pthread_mutex_lock(&g_audio.lock);
-    if (g_audio.running) g_audio.stop_requested = 1;
+    if (g_audio.running && (!g_audio.alarm_mode || allow_alarm)) {
+        g_audio.stop_requested = 1;
+        notification_mode = g_audio.notification_mode;
+        requested = 1;
+    }
     pthread_mutex_unlock(&g_audio.lock);
-    audio_clear_visible_state();
+    if (requested && !notification_mode) audio_clear_visible_state();
+    return requested;
+}
+
+static int audio_request_stop(void) {
+    return audio_request_stop_internal(0);
+}
+
+static int audio_request_stop_from_touch(void) {
+    return audio_request_stop_internal(1);
 }
 
 static int audio_wait_stopped(unsigned int timeout_ms) {
@@ -3069,40 +3736,32 @@ static int audio_wait_stopped(unsigned int timeout_ms) {
     return stopped ? 0 : -1;
 }
 
-/*
- * Request-only stop for latency-sensitive callers such as IPC and touch.
- * The decoder thread publishes completion through g_audio.stopped.
- */
 static void audio_stop(void) {
-    audio_request_stop();
+    (void)audio_request_stop();
 }
 
-/*
- * Use only where the caller must know the old decoder has exited before it
- * can safely continue, such as track replacement and daemon shutdown.
- */
+static void audio_force_stop(void) {
+    (void)audio_request_stop_internal(1);
+}
+
 static int audio_stop_and_wait(unsigned int timeout_ms) {
-    audio_request_stop();
+    if (audio_is_alarm_session()) return -1;
+    (void)audio_request_stop();
     return audio_wait_stopped(timeout_ms);
 }
 
-static void audio_play_music_file(const char *music_file, int start_volume, int end_volume, int use_ramp) {
-    char safe_file[MUSIC_FILE_MAX];
-    char path[512];
+static int audio_force_stop_and_wait(unsigned int timeout_ms) {
+    audio_force_stop();
+    return audio_wait_stopped(timeout_ms);
+}
+
+static int audio_start_resolved_file(const char *path, const char *safe_file,
+                                     int start_volume, int end_volume, int alarm_mode,
+                                     int story_mode, int notification_mode) {
     char song_title[MP_ID3_TEXT_MAX];
     char song_artist[MP_ID3_TEXT_MAX];
     char song_display[SONG_METADATA_TEXT_MAX];
-    int global_volume;
 
-    safe_file[0] = '\0';
-    if (music_file && *music_file && safe_asset_filename(music_file) && has_mp3_ext(music_file)) {
-        safe_str(safe_file, sizeof(safe_file), music_file);
-    } else if (choose_random_music_file(safe_file, sizeof(safe_file)) != 0) {
-        safe_str(safe_file, sizeof(safe_file), "alarm.mp3");
-    }
-
-    make_music_path(safe_file, path, sizeof(path));
-    if (access(path, R_OK) != 0) return;
     song_metadata_for_file(path, safe_file,
                            song_title, sizeof(song_title),
                            song_artist, sizeof(song_artist),
@@ -3110,70 +3769,314 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
 
     start_volume = clamp_int(start_volume, 0, 100);
     end_volume = clamp_int(end_volume, 0, 100);
-
-    pthread_mutex_lock(&g_state.lock);
-    global_volume = clamp_int(g_state.global_volume, 0, 100);
-    pthread_mutex_unlock(&g_state.lock);
-
-    /*
-       Alarm playback intentionally ignores global volume.
-       Per-alarm start/end volumes are absolute 0..100 values so the OLED
-       indicator and the actual PCM sample scaling always match.
-       Normal/manual music playback still passes global_volume as start=end.
-    */
-    if (!use_ramp) {
-        start_volume = global_volume;
-        end_volume = global_volume;
-    }
-
-    if (audio_stop_and_wait(3000u) != 0) return;
+    if (!notification_mode && audio_stop_and_wait(3000u) != 0) return -3;
 
     struct audio_play_request *req = calloc(1, sizeof(*req));
-    if (!req) return;
+    if (!req) return -1;
     safe_str(req->path, sizeof(req->path), path);
     safe_str(req->file, sizeof(req->file), safe_file);
-    req->start_volume = clamp_int(start_volume, 0, 100);
-    req->end_volume = clamp_int(end_volume, 0, 100);
-    req->use_ramp = use_ramp ? 1 : 0;
+    req->start_volume = start_volume;
+    req->end_volume = end_volume;
+    req->alarm_mode = alarm_mode;
+    req->notification_mode = notification_mode ? 1 : 0;
 
     pthread_mutex_lock(&g_audio.lock);
+    if (notification_mode && g_audio.running) {
+        pthread_mutex_unlock(&g_audio.lock);
+        free(req);
+        return -4;
+    }
     g_audio.running = 1;
     g_audio.stop_requested = 0;
+    g_audio.alarm_mode = alarm_mode;
+    g_audio.notification_mode = notification_mode ? 1 : 0;
+    g_audio.timed_out = 0;
+    g_audio.alarm_deadline_ms = alarm_mode
+        ? monotonic_millis() + (uint64_t)ALARM_MAX_DURATION_SECONDS * 1000u : 0;
     safe_str(g_audio.file, sizeof(g_audio.file), safe_file);
     pthread_mutex_unlock(&g_audio.lock);
 
-    pthread_mutex_lock(&g_state.lock);
-    g_state.audio_playing = 1;
-    safe_str(g_state.audio_file, sizeof(g_state.audio_file), safe_file);
-    safe_str(g_state.audio_title, sizeof(g_state.audio_title), song_title);
-    safe_str(g_state.audio_artist, sizeof(g_state.audio_artist), song_artist);
-    safe_str(g_state.audio_display, sizeof(g_state.audio_display), song_display);
-    g_state.audio_scroll_started_ms = monotonic_millis();
-    /* Every playback path uses this function. Return to the clock so enabled
-       Title - Artist metadata is visible for alarms, GUI/API play, and touch. */
-    if (g_state.show_song_metadata) g_state.display_mode = 0;
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
+    if (!notification_mode) {
+        pthread_mutex_lock(&g_state.lock);
+        uint64_t display_started_ms = monotonic_millis();
+        g_state.audio_playing = 1;
+        safe_str(g_state.audio_file, sizeof(g_state.audio_file), safe_file);
+        safe_str(g_state.audio_title, sizeof(g_state.audio_title), song_title);
+        safe_str(g_state.audio_artist, sizeof(g_state.audio_artist), song_artist);
+        safe_str(g_state.audio_display, sizeof(g_state.audio_display), song_display);
+        g_state.story_playing = story_mode ? 1 : 0;
+        if (story_mode) {
+            g_state.story_intro_until_ms = display_started_ms + STORY_INTRO_SECONDS * 1000u;
+            g_state.story_title_until_ms = g_state.story_intro_until_ms + STORY_TITLE_SECONDS * 1000u;
+            g_state.audio_scroll_started_ms = g_state.story_intro_until_ms;
+        } else {
+            g_state.story_intro_until_ms = 0;
+            g_state.story_title_until_ms = 0;
+            g_state.audio_scroll_started_ms = display_started_ms;
+        }
+        if (story_mode || g_state.show_song_metadata) g_state.display_mode = 0;
+        g_state.display_dirty = 1;
+        pthread_mutex_unlock(&g_state.lock);
+    }
+    if (alarm_mode) alarm_volume_state_set(1, start_volume);
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, audio_thread_main, req) != 0) {
         pthread_mutex_lock(&g_audio.lock);
         g_audio.running = 0;
         g_audio.stop_requested = 0;
+        g_audio.alarm_mode = 0;
+        g_audio.notification_mode = 0;
+        g_audio.timed_out = 0;
+        g_audio.alarm_deadline_ms = 0;
         g_audio.file[0] = '\0';
         pthread_cond_broadcast(&g_audio.stopped);
         pthread_mutex_unlock(&g_audio.lock);
-        pthread_mutex_lock(&g_state.lock);
-        g_state.audio_playing = 0;
-        g_state.audio_file[0] = '\0';
-        clear_audio_metadata_locked();
-        g_state.display_dirty = 1;
-        pthread_mutex_unlock(&g_state.lock);
+        if (!notification_mode) audio_clear_visible_state();
         free(req);
-        return;
+        return -1;
     }
     pthread_detach(tid);
+    return 0;
+}
 
+static int audio_play_music_file(const char *music_file, int start_volume, int end_volume, int use_ramp) {
+    char safe_file[MUSIC_FILE_MAX] = "";
+    char path[512] = "";
+    int alarm_mode = use_ramp ? 1 : 0;
+
+    if (!alarm_mode) {
+        int bedtime_music_enabled;
+        pthread_mutex_lock(&g_state.lock);
+        bedtime_music_enabled = g_state.bedtime_music_enabled;
+        start_volume = end_volume = clamp_int(g_state.global_volume, 0, 100);
+        pthread_mutex_unlock(&g_state.lock);
+        if (is_bedtime_now() && !bedtime_music_enabled) {
+            app_log("music", "Music request blocked during bedtime");
+            return -2;
+        }
+    }
+
+    if (choose_playable_uploaded_music(music_file, safe_file, sizeof(safe_file), path, sizeof(path)) != 0) {
+        if (!alarm_mode || access(DEFAULT_ALARM_PATH, R_OK) != 0 || !audio_file_playable(DEFAULT_ALARM_PATH)) {
+            app_log(alarm_mode ? "alarm" : "music", "No playable audio file is available");
+            return -1;
+        }
+        safe_str(safe_file, sizeof(safe_file), DEFAULT_ALARM_LABEL);
+        safe_str(path, sizeof(path), DEFAULT_ALARM_PATH);
+        app_log("alarm", "Using protected built-in alarm sound");
+    }
+
+    return audio_start_resolved_file(path, safe_file, start_volume, end_volume, alarm_mode, 0, 0);
+}
+
+static int audio_play_story_file(const char *story_file) {
+    char safe_file[MUSIC_FILE_MAX] = "";
+    char path[512] = "";
+    int enabled;
+    int volume;
+
+    pthread_mutex_lock(&g_state.lock);
+    enabled = g_state.story_mode_enabled;
+    volume = clamp_int(g_state.story_volume, 0, 100);
+    pthread_mutex_unlock(&g_state.lock);
+    if (!enabled) return -2;
+
+    if (choose_playable_story(story_file, safe_file, sizeof(safe_file), path, sizeof(path)) != 0) {
+        app_log("story", "No playable story is available");
+        return -1;
+    }
+    refresh_story_collage();
+    int result = audio_start_resolved_file(path, safe_file, volume, volume, 0, 1, 0);
+    if (result == 0) app_log("story", "Story started: %s at %d%% volume", safe_file, volume);
+    return result;
+}
+
+static int audio_play_message_chime(void) {
+    if (access(MESSAGE_CHIME_PATH, R_OK) != 0 || !audio_file_playable(MESSAGE_CHIME_PATH))
+        return -1;
+
+    int volume;
+    pthread_mutex_lock(&g_state.lock);
+    volume = clamp_int(g_state.global_volume, 0, MESSAGE_CHIME_VOLUME_MAX);
+    pthread_mutex_unlock(&g_state.lock);
+
+    return audio_start_resolved_file(MESSAGE_CHIME_PATH, MESSAGE_CHIME_LABEL,
+                                     volume, volume, 0, 0, 1);
+}
+
+struct oled_network_diagnostics {
+    char interface_name[IFNAMSIZ];
+    char ip_address[INET_ADDRSTRLEN];
+    char ssid[IW_ESSID_MAX_SIZE + 1];
+    char hostname[64];
+    int signal_percent;
+    int signal_dbm;
+    int signal_available;
+};
+
+static void read_oled_network_diagnostics(struct oled_network_diagnostics *info) {
+    if (!info) return;
+    memset(info, 0, sizeof(*info));
+    if (gethostname(info->hostname, sizeof(info->hostname) - 1) != 0)
+        safe_str(info->hostname, sizeof(info->hostname), "Unavailable");
+
+    FILE *wireless = fopen("/proc/net/wireless", "r");
+    if (wireless) {
+        char line[512];
+        while (fgets(line, sizeof(line), wireless)) {
+            char name[IFNAMSIZ] = "";
+            double quality = 0.0;
+            double level = 0.0;
+            if (sscanf(line, " %15[^:]: %*d %lf %lf", name, &quality, &level) == 3) {
+                safe_str(info->interface_name, sizeof(info->interface_name), name);
+                int percent = (int)((quality / 70.0) * 100.0 + 0.5);
+                info->signal_percent = clamp_int(percent, 0, 100);
+                int dbm = (int)level;
+                if (dbm > 100) dbm -= 256;
+                info->signal_dbm = dbm;
+                info->signal_available = 1;
+                break;
+            }
+        }
+        fclose(wireless);
+    }
+
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return;
+
+    if (info->interface_name[0]) {
+        struct iwreq request;
+        char essid[IW_ESSID_MAX_SIZE + 1];
+        memset(&request, 0, sizeof(request));
+        memset(essid, 0, sizeof(essid));
+        safe_str(request.ifr_name, sizeof(request.ifr_name), info->interface_name);
+        request.u.essid.pointer = essid;
+        request.u.essid.length = IW_ESSID_MAX_SIZE;
+        if (ioctl(fd, SIOCGIWESSID, &request) == 0) {
+            size_t length = request.u.essid.length;
+            if (length > IW_ESSID_MAX_SIZE) length = IW_ESSID_MAX_SIZE;
+            essid[length] = '\0';
+            safe_str(info->ssid, sizeof(info->ssid), essid);
+        }
+    }
+
+    struct ifreq interfaces[32];
+    struct ifconf list;
+    memset(&interfaces, 0, sizeof(interfaces));
+    memset(&list, 0, sizeof(list));
+    list.ifc_len = sizeof(interfaces);
+    list.ifc_req = interfaces;
+    if (ioctl(fd, SIOCGIFCONF, &list) == 0) {
+        int best_score = -1;
+        size_t count = (size_t)list.ifc_len / sizeof(struct ifreq);
+        for (size_t i = 0; i < count; i++) {
+            struct ifreq *candidate = &interfaces[i];
+            if (candidate->ifr_addr.sa_family != AF_INET) continue;
+            struct ifreq flags_request;
+            memset(&flags_request, 0, sizeof(flags_request));
+            safe_str(flags_request.ifr_name, sizeof(flags_request.ifr_name), candidate->ifr_name);
+            if (ioctl(fd, SIOCGIFFLAGS, &flags_request) != 0) continue;
+            if (!(flags_request.ifr_flags & IFF_UP) || (flags_request.ifr_flags & IFF_LOOPBACK)) continue;
+
+            int score = 10;
+            if (info->interface_name[0] && strcmp(candidate->ifr_name, info->interface_name) == 0) score = 100;
+            else if (strncmp(candidate->ifr_name, "wl", 2) == 0) score = 70;
+            else if (strncmp(candidate->ifr_name, "en", 2) == 0 ||
+                     strncmp(candidate->ifr_name, "eth", 3) == 0) score = 50;
+            if (score <= best_score) continue;
+
+            char text[INET_ADDRSTRLEN] = "";
+            struct sockaddr_in *address = (struct sockaddr_in *)&candidate->ifr_addr;
+            if (!inet_ntop(AF_INET, &address->sin_addr, text, sizeof(text))) continue;
+            best_score = score;
+            safe_str(info->ip_address, sizeof(info->ip_address), text);
+            if (!info->interface_name[0])
+                safe_str(info->interface_name, sizeof(info->interface_name), candidate->ifr_name);
+        }
+    }
+    close(fd);
+}
+
+static void fit_oled_text(char *text, size_t text_len) {
+    if (!text || text_len == 0) return;
+    while (text[0] && text5x7_width(text, 1) > OLED_W - 4) {
+        size_t length = strlen(text);
+        if (length <= 3) break;
+        text[length - 1] = '\0';
+        length--;
+        if (length >= 3) {
+            text[length - 1] = '.';
+            text[length - 2] = '.';
+            text[length - 3] = '.';
+        }
+    }
+}
+
+static void draw_diagnostic_line(int y, const char *label, const char *value, uint8_t colour) {
+    char line[96];
+    snprintf(line, sizeof(line), "%s: %s", label, value && *value ? value : "Unavailable");
+    fit_oled_text(line, sizeof(line));
+    draw_text5x7(2, y, 1, line, colour);
+}
+
+static void draw_diagnostic_screen(void) {
+    struct oled_network_diagnostics info;
+    read_oled_network_diagnostics(&info);
+    oled_clear_fb(0);
+    draw_text5x7(2, 0, 1, "NETWORK DIAGNOSTICS", 15);
+    draw_diagnostic_line(11, "WIFI", info.ssid, 12);
+    char signal[48];
+    if (info.signal_available)
+        snprintf(signal, sizeof(signal), "%d%% %d dBm", info.signal_percent, info.signal_dbm);
+    else
+        safe_str(signal, sizeof(signal), "Unavailable");
+    draw_diagnostic_line(22, "SIGNAL", signal, 12);
+    draw_diagnostic_line(33, "IP", info.ip_address, 12);
+    draw_diagnostic_line(44, "HOST", info.hostname, 12);
+    draw_text5x7(2, 55, 1, "TAP TO CLOSE", 8);
+    oled_flush_full();
+}
+
+static int diagnostic_screen_active(void) {
+    int active;
+    pthread_mutex_lock(&g_state.lock);
+    active = g_state.display_mode == 3;
+    pthread_mutex_unlock(&g_state.lock);
+    return active;
+}
+
+static int open_diagnostic_screen(void) {
+    int opened = 0;
+    pthread_mutex_lock(&g_state.lock);
+    if (!g_state.alarm_active && !g_state.audio_playing && !g_state.story_playing) {
+        g_state.diagnostic_return_mode = g_state.display_mode;
+        if (g_state.diagnostic_return_mode < 0 || g_state.diagnostic_return_mode > 2)
+            g_state.diagnostic_return_mode = 0;
+        g_state.display_mode = 3;
+        g_state.diagnostic_until = time(NULL) + DIAGNOSTIC_SCREEN_SECONDS;
+        g_state.display_dirty = 1;
+        opened = 1;
+    }
+    pthread_mutex_unlock(&g_state.lock);
+    if (opened) app_log("touch", "Eight-second hold opened OLED diagnostics");
+    return opened;
+}
+
+static void close_diagnostic_screen(void) {
+    int closed = 0;
+    pthread_mutex_lock(&g_state.lock);
+    if (g_state.display_mode == 3) {
+        int return_mode = g_state.diagnostic_return_mode;
+        if (return_mode == 2 && time(NULL) >= g_state.message_until) return_mode = 0;
+        g_state.display_mode = return_mode;
+        g_state.diagnostic_return_mode = 0;
+        g_state.diagnostic_until = 0;
+        g_state.display_dirty = 1;
+        closed = 1;
+    }
+    pthread_mutex_unlock(&g_state.lock);
+    if (closed) app_log("touch", "OLED diagnostics closed");
 }
 
 /* ---------------- TTP223B touch input ---------------- */
@@ -3288,7 +4191,11 @@ static void *touch_thread_main(void *arg) {
     if (raw < 0) raw = 0;
     int last_raw = raw;
     int stable = raw;
-    int long_press_fired = 0;
+    int action_consumed = 0;
+    int diagnostic_opened_this_press = 0;
+    int diagnostic_exit_press = 0;
+    int story_press_count = 0;
+    uint64_t story_window_started_ms = 0;
     uint64_t now_ms = monotonic_millis();
     uint64_t raw_changed_ms = now_ms;
     uint64_t pressed_ms = stable ? now_ms : 0;
@@ -3305,26 +4212,102 @@ static void *touch_thread_main(void *arg) {
             raw_changed_ms = now_ms;
         }
 
+        if (story_touch_input_locked(now_ms)) {
+            if (current != stable && now_ms - raw_changed_ms >= TOUCH_DEBOUNCE_MS) {
+                stable = current;
+                touch_set_state(1, stable);
+                update_led_scene();
+            }
+
+            /* Consume every press and release until the Story Mode intro and
+               title have finished. A held sensor is also ignored on release. */
+            action_consumed = 1;
+            diagnostic_opened_this_press = 0;
+            diagnostic_exit_press = 0;
+            story_press_count = 0;
+            story_window_started_ms = 0;
+            pressed_ms = 0;
+            continue;
+        }
+
         if (current != stable && now_ms - raw_changed_ms >= TOUCH_DEBOUNCE_MS) {
             stable = current;
             touch_set_state(1, stable);
+            update_led_scene();
             if (stable) {
                 pressed_ms = now_ms;
-                long_press_fired = 0;
+                action_consumed = 0;
+                diagnostic_opened_this_press = 0;
+                diagnostic_exit_press = diagnostic_screen_active();
+                if (audio_is_alarm_session()) {
+                    action_consumed = 1;
+                    if (audio_request_stop_from_touch())
+                        app_log("touch", "Alarm dismissed with the touch sensor");
+                }
             } else {
-                if (!long_press_fired && audio_is_playing()) {
+                uint64_t held_ms = pressed_ms > 0 && now_ms >= pressed_ms ? now_ms - pressed_ms : 0;
+                if (diagnostic_exit_press) {
+                    close_diagnostic_screen();
+                    action_consumed = 1;
+                    story_press_count = 0;
+                    story_window_started_ms = 0;
+                } else if (diagnostic_opened_this_press || action_consumed) {
+                    story_press_count = 0;
+                    story_window_started_ms = 0;
+                } else if (held_ms >= TOUCH_LONG_PRESS_MS) {
+                    story_press_count = 0;
+                    story_window_started_ms = 0;
+                    int play_result = audio_play_music_file("", 0, 0, 0);
+                    if (play_result == 0)
+                        app_log("touch", "Long press started random music");
+                    else if (play_result == -2)
+                        app_log("touch", "Long-press music is disabled during bedtime");
+                } else if (audio_is_playing()) {
                     app_log("touch", "Short press requested audio stop");
-                    audio_request_stop();
+                    (void)audio_request_stop_from_touch();
+                    story_press_count = 0;
+                    story_window_started_ms = 0;
+                } else {
+                    int story_enabled;
+                    pthread_mutex_lock(&g_state.lock);
+                    story_enabled = g_state.story_mode_enabled;
+                    pthread_mutex_unlock(&g_state.lock);
+                    if (!story_enabled) {
+                        story_press_count = 0;
+                        story_window_started_ms = 0;
+                    } else {
+                        if (story_press_count == 0 ||
+                            now_ms - story_window_started_ms > STORY_PRESS_WINDOW_MS) {
+                            story_press_count = 0;
+                            story_window_started_ms = now_ms;
+                        }
+                        story_press_count++;
+                        if (story_press_count >= STORY_PRESS_COUNT) {
+                            story_press_count = 0;
+                            story_window_started_ms = 0;
+                            int play_result = audio_play_story_file("");
+                            if (play_result == 0)
+                                app_log("touch", "Ten short presses started a random story");
+                            else if (play_result == -1)
+                                app_log("touch", "Story gesture detected, but no playable story is available");
+                        }
+                    }
                 }
                 pressed_ms = 0;
+                action_consumed = 0;
+                diagnostic_opened_this_press = 0;
+                diagnostic_exit_press = 0;
             }
         }
 
-        if (stable && !long_press_fired &&
-            now_ms - pressed_ms >= TOUCH_LONG_PRESS_MS) {
-            long_press_fired = 1;
-            app_log("touch", "Long press requested random music");
-            audio_play_music_file("", 0, 0, 0);
+        if (stable && !action_consumed && !diagnostic_exit_press && pressed_ms > 0 &&
+            now_ms - pressed_ms >= TOUCH_DIAGNOSTIC_PRESS_MS) {
+            story_press_count = 0;
+            story_window_started_ms = 0;
+            if (open_diagnostic_screen()) {
+                action_consumed = 1;
+                diagnostic_opened_this_press = 1;
+            }
         }
     }
 
@@ -3333,6 +4316,15 @@ static void *touch_thread_main(void *arg) {
 }
 
 /* ---------------- Private binary IPC ---------------- */
+
+static const char *oled_color_name_for_id(int id) {
+    switch (id) {
+        case MP_OLED_COLOR_YELLOW: return "yellow";
+        case MP_OLED_COLOR_WHITE: return "white";
+        case MP_OLED_COLOR_GREEN:
+        default: return "green";
+    }
+}
 
 static const char *oled_font_name_for_id(int id) {
     switch (id) {
@@ -3346,8 +4338,8 @@ static const char *oled_font_name_for_id(int id) {
 static const char *display_mode_name(int mode) {
     switch (mode) {
         case 1: return "clear";
-        case 2: return "face";
-        case 3: return "message";
+        case 2: return "message";
+        case 3: return "diagnostics";
         default: return "clock";
     }
 }
@@ -3385,6 +4377,58 @@ static int ipc_bad_payload(int client) {
     return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid IPC payload\"}");
 }
 
+static time_t next_alarm_time(const struct alarm_slot alarms[MAX_ALARMS], time_t now,
+                              int *alarm_id) {
+    time_t best = 0;
+    int best_id = 0;
+    struct tm base;
+    localtime_r(&now, &base);
+    for (int day = 0; day <= 7; day++) {
+        struct tm day_tm = base;
+        day_tm.tm_hour = 12;
+        day_tm.tm_min = 0;
+        day_tm.tm_sec = 0;
+        day_tm.tm_mday += day;
+        day_tm.tm_isdst = -1;
+        time_t normalized = mktime(&day_tm);
+        if (normalized == (time_t)-1) continue;
+        localtime_r(&normalized, &day_tm);
+        for (int i = 0; i < MAX_ALARMS; i++) {
+            if (!alarms[i].enabled || !(alarms[i].weekdays & (1 << day_tm.tm_wday))) continue;
+            struct tm candidate_tm = day_tm;
+            candidate_tm.tm_hour = alarms[i].hour;
+            candidate_tm.tm_min = alarms[i].min;
+            candidate_tm.tm_sec = 0;
+            candidate_tm.tm_isdst = -1;
+            time_t candidate = mktime(&candidate_tm);
+            if (candidate <= now) continue;
+            if (!best || candidate < best) {
+                best = candidate;
+                best_id = i + 1;
+            }
+        }
+    }
+    if (alarm_id) *alarm_id = best_id;
+    return best;
+}
+
+static void format_next_alarm(time_t value, int clock_24h_mode, char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (value <= 0) {
+        safe_str(out, out_len, "No alarm scheduled");
+        return;
+    }
+    struct tm tmv;
+    localtime_r(&value, &tmv);
+    char day[32];
+    char clock[32];
+    strftime(day, sizeof(day), "%A", &tmv);
+    strftime(clock, sizeof(clock), clock_24h_mode ? "%H:%M" : "%I:%M %p", &tmv);
+    if (!clock_24h_mode && clock[0] == '0') memmove(clock, clock + 1, strlen(clock));
+    snprintf(out, out_len, "%s at %s", day, clock);
+}
+
 static int ipc_status(int client) {
     time_t now = time(NULL);
     struct tm tmv;
@@ -3405,8 +4449,13 @@ static int ipc_status(int client) {
     int oled_ok = g_state.oled_ok;
     int font = g_state.oled_font;
     int font_size = g_state.oled_font_size;
-    int current_face = g_state.current_face;
     int global_volume = g_state.global_volume;
+    int story_mode_enabled = g_state.story_mode_enabled;
+    int story_volume = g_state.story_volume;
+    int story_playing = g_state.story_playing;
+    int story_intro_active = monotonic_millis() < g_state.story_intro_until_ms;
+    char story_message[STORY_MESSAGE_MAX];
+    mp_safe_str(story_message, sizeof(story_message), g_state.story_message);
     int show_song_metadata = g_state.show_song_metadata;
     time_t pending_message_at = g_state.pending_message_at;
     int bedtime_enabled = g_state.bedtime_enabled;
@@ -3415,7 +4464,10 @@ static int ipc_status(int client) {
     int beh = g_state.bedtime_end_hour;
     int bem = g_state.bedtime_end_min;
     int bedtime_dim = g_state.bedtime_dim_percent;
+    int bedtime_music_enabled = g_state.bedtime_music_enabled;
+    long long last_successful_alarm = g_state.last_successful_alarm;
     int clock_24h_mode = g_state.clock_24h_mode;
+    int oled_color = g_state.oled_color;
     int oled_brightness = g_state.oled_brightness_current;
     int touch_ok = 0;
     int touch_pressed = 0;
@@ -3426,6 +4478,10 @@ static int ipc_status(int client) {
     char audio_artist[MP_ID3_TEXT_MAX];
     char audio_display[SONG_METADATA_TEXT_MAX];
     struct alarm_slot alarms[MAX_ALARMS];
+    struct mp_led_profile led_profiles[MP_LED_SCENE_COUNT];
+    struct mp_led_global_settings led_settings = g_state.led_settings;
+    int led_bedtime_fade_active = g_state.led_bedtime_fade_active;
+    time_t led_preview_until = g_state.led_preview_until;
     mp_safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
     mp_safe_str(clock_name, sizeof(clock_name), g_state.clock_name);
     mp_safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
@@ -3433,12 +4489,25 @@ static int ipc_status(int client) {
     mp_safe_str(audio_artist, sizeof(audio_artist), g_state.audio_artist);
     mp_safe_str(audio_display, sizeof(audio_display), g_state.audio_display);
     memcpy(alarms, g_state.alarms, sizeof(alarms));
+    memcpy(led_profiles, g_state.led_profiles, sizeof(led_profiles));
     pthread_mutex_unlock(&g_state.lock);
     touch_get_state(&touch_ok, &touch_pressed);
 
+    struct mp_led_status led_status;
+    memset(&led_status, 0, sizeof(led_status));
+    led_status.scene = MP_LED_SCENE_DAYTIME;
+    mp_led_snapshot(&led_status);
+    int led_ok = led_status.ready;
+
+    int next_alarm_id = 0;
+    time_t next_alarm_at = next_alarm_time(alarms, now, &next_alarm_id);
+    char next_alarm_text[96];
+    format_next_alarm(next_alarm_at, clock_24h_mode, next_alarm_text, sizeof(next_alarm_text));
+
     char e_time[128], e_date[192], e_clock_name[160], e_audio_file[512];
     char e_audio_title[384], e_audio_artist[384], e_audio_display[768];
-    char e_font_file[256], e_font_name[256];
+    char e_story_message[192];
+    char e_font_file[256], e_font_name[256], e_next_alarm[192];
     mp_json_escape(e_time, sizeof(e_time), timestr);
     mp_json_escape(e_date, sizeof(e_date), datestr);
     mp_json_escape(e_clock_name, sizeof(e_clock_name), clock_name);
@@ -3446,30 +4515,36 @@ static int ipc_status(int client) {
     mp_json_escape(e_audio_title, sizeof(e_audio_title), audio_title);
     mp_json_escape(e_audio_artist, sizeof(e_audio_artist), audio_artist);
     mp_json_escape(e_audio_display, sizeof(e_audio_display), audio_display);
+    mp_json_escape(e_story_message, sizeof(e_story_message), story_message);
     mp_json_escape(e_font_file, sizeof(e_font_file), font_file);
     mp_json_escape(e_font_name, sizeof(e_font_name), font_file[0] ? font_file : oled_font_name_for_id(font));
+    mp_json_escape(e_next_alarm, sizeof(e_next_alarm), next_alarm_text);
 
     long long message_send_in = pending_message_at > now ? (long long)(pending_message_at - now) : 0LL;
     struct mp_buffer body;
-    if (mp_buffer_init(&body, 4096, MP_IPC_MAX_PAYLOAD) != 0)
+    if (mp_buffer_init(&body, 8192, MP_IPC_MAX_PAYLOAD) != 0)
         return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
     mp_buffer_appendf(&body,
         "{\"time\":\"%s\",\"date\":\"%s\",\"clock_name\":\"%s\",\"app_version\":\"%s\","
         "\"uptime_seconds\":%ld,\"audio_file\":\"%s\",\"audio_title\":\"%s\",\"audio_artist\":\"%s\","
-        "\"audio_display\":\"%s\",\"global_volume\":%d,\"show_song_metadata\":%d,"
-        "\"message_pending\":%d,\"message_send_in_seconds\":%lld,\"bedtime_enabled\":%d,"
+        "\"audio_display\":\"%s\",\"global_volume\":%d,\"story_mode_enabled\":%d,\"story_volume\":%d,"
+        "\"story_playing\":%d,\"story_intro_active\":%d,\"story_message\":\"%s\",\"show_song_metadata\":%d,"
+        "\"message_pending\":%d,\"message_send_in_seconds\":%lld,\"message_scheduled_for\":%lld,\"bedtime_enabled\":%d,"
         "\"bedtime_start_hour\":%d,\"bedtime_start_min\":%d,\"bedtime_end_hour\":%d,\"bedtime_end_min\":%d,"
-        "\"bedtime_dim_percent\":%d,\"clock_24h_mode\":%d,\"bedtime_active\":%d,\"oled_brightness_percent\":%d,"
+        "\"bedtime_dim_percent\":%d,\"bedtime_music_enabled\":%d,\"clock_24h_mode\":%d,\"oled_color\":\"%s\",\"bedtime_active\":%d,\"oled_brightness_percent\":%d,"
+        "\"next_alarm_id\":%d,\"next_alarm_at\":%lld,\"next_alarm_text\":\"%s\",\"last_successful_alarm\":%lld,"
         "\"audio_playing\":%d,\"alarm_active\":%d,\"alarm_volume_percent\":%d,\"display_mode\":\"%s\",\"oled_ok\":%d,"
         "\"touch_ok\":%d,\"touch_pressed\":%d,\"touch_gpio\":%d,"
-        "\"current_face\":%d,\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\",\"alarms\":[",
+        "\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\",\"alarms\":[",
         e_time, e_date, e_clock_name, APP_VERSION, uptime_seconds, e_audio_file,
-        e_audio_title, e_audio_artist, e_audio_display, global_volume, show_song_metadata,
-        message_send_in > 0 ? 1 : 0, message_send_in, bedtime_enabled,
-        bsh, bsm, beh, bem, bedtime_dim, clock_24h_mode,
-        is_bedtime_now(), oled_brightness, audio, alarm_active, alarm_volume_percent,
+        e_audio_title, e_audio_artist, e_audio_display, global_volume, story_mode_enabled, story_volume,
+        story_playing, story_intro_active, e_story_message, show_song_metadata,
+        message_send_in > 0 ? 1 : 0, message_send_in, (long long)pending_message_at, bedtime_enabled,
+        bsh, bsm, beh, bem, bedtime_dim, bedtime_music_enabled, clock_24h_mode, oled_color_name_for_id(oled_color),
+        is_bedtime_now(), oled_brightness, next_alarm_id, (long long)next_alarm_at, e_next_alarm,
+        last_successful_alarm, audio, alarm_active, alarm_volume_percent,
         display_mode_name(mode), oled_ok, touch_ok, touch_pressed, GPIO_TOUCH,
-        current_face, font, font_size, e_font_file, e_font_name);
+        font, font_size, e_font_file, e_font_name);
 
     for (int i = 0; i < MAX_ALARMS && !body.failed; i++) {
         mp_buffer_appendf(&body,
@@ -3478,6 +4553,52 @@ static int ipc_status(int client) {
             alarms[i].weekdays, alarms[i].start_volume, alarms[i].end_volume);
         mp_buffer_append_json_string(&body, alarms[i].music_file);
         mp_buffer_append(&body, "\"}");
+    }
+    mp_buffer_appendf(&body,
+        "],\"led_ok\":%d,\"led_scene\":\"%s\",\"led_colour\":\"#%02X%02X%02X\","
+        "\"led_output\":\"#%02X%02X%02X\",\"led_rgb\":\"#%02X%02X%02X\","
+        "\"led_write_errors\":%u,\"led_pwm_hz\":%d,\"led_pwm_levels\":%d,"
+        "\"led_common_cathode\":1,\"led_gpio_red\":%d,\"led_gpio_green\":%d,\"led_gpio_blue\":%d,"
+        "\"led_preview_active\":%d,\"led_bedtime_fade_active\":%d,"
+        "\"led_gpio\":{\"red\":%d,\"green\":%d,\"blue\":%d},"
+        "\"led_settings\":{\"enabled\":%u,\"max_brightness\":%u,\"red_gain\":%u,"
+        "\"green_gain\":%u,\"blue_gain\":%u,\"idle_off\":%u,\"bedtime_fade_minutes\":%u,"
+        "\"touch_blink_enabled\":%u,\"touch_blink_brightness\":%u,"
+        "\"touch_blink_color\":\"#%02X%02X%02X\"},"
+        "\"led_enabled\":%u,\"led_max_brightness\":%u,\"led_red_gain\":%u,"
+        "\"led_green_gain\":%u,\"led_blue_gain\":%u,\"led_idle_off\":%u,"
+        "\"led_bedtime_fade_minutes\":%u,\"led_touch_blink_enabled\":%u,"
+        "\"led_touch_blink_brightness\":%u,\"led_touch_blink_color\":\"#%02X%02X%02X\","
+        "\"led_profiles\":[",
+        led_ok, mp_led_scene_name(led_status.scene),
+        led_status.colour_red, led_status.colour_green, led_status.colour_blue,
+        led_status.output_red, led_status.output_green, led_status.output_blue,
+        led_status.output_red, led_status.output_green, led_status.output_blue,
+        led_status.write_errors, MP_LED_PWM_HZ, MP_LED_PWM_LEVELS,
+        MP_LED_GPIO_RED, MP_LED_GPIO_GREEN, MP_LED_GPIO_BLUE,
+        led_preview_until > now ? 1 : 0,
+        led_bedtime_fade_active,
+        MP_LED_GPIO_RED, MP_LED_GPIO_GREEN, MP_LED_GPIO_BLUE,
+        led_settings.enabled, led_settings.max_brightness, led_settings.red_gain,
+        led_settings.green_gain, led_settings.blue_gain, led_settings.idle_off,
+        led_settings.bedtime_fade_minutes,
+        led_settings.touch_blink_enabled, led_settings.touch_blink_brightness,
+        led_settings.touch_blink_red, led_settings.touch_blink_green, led_settings.touch_blink_blue,
+        led_settings.enabled, led_settings.max_brightness, led_settings.red_gain,
+        led_settings.green_gain, led_settings.blue_gain, led_settings.idle_off,
+        led_settings.bedtime_fade_minutes,
+        led_settings.touch_blink_enabled, led_settings.touch_blink_brightness,
+        led_settings.touch_blink_red, led_settings.touch_blink_green, led_settings.touch_blink_blue);
+    for (int i = 0; i < MP_LED_SCENE_COUNT && !body.failed; i++) {
+        const struct mp_led_profile *profile = &led_profiles[i];
+        mp_buffer_appendf(&body,
+            "%s{\"scene\":\"%s\",\"scene_id\":%d,\"effect\":\"%s\",\"effect_id\":%u,"
+            "\"brightness\":%u,\"cycle_seconds\":%u,\"color1\":\"#%02X%02X%02X\",\"color2\":\"#%02X%02X%02X\"}",
+            i ? "," : "", mp_led_scene_name((enum mp_led_scene)i), i,
+            mp_led_effect_name((enum mp_led_effect)profile->effect), profile->effect,
+            profile->brightness, profile->cycle_seconds,
+            profile->red1, profile->green1, profile->blue1,
+            profile->red2, profile->green2, profile->blue2);
     }
     mp_buffer_append(&body, "]}");
     return ipc_send_builder(client, 200, &body);
@@ -3553,45 +4674,44 @@ static int ipc_logs_clear(int client) {
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
-static int ipc_message_limits(int client) {
-    char body[512];
-    snprintf(body, sizeof(body),
-        "{\"max_chars\":%d,\"advisory_chars\":%d,\"max_lines\":%d,\"text_width\":%d,\"duration_seconds\":%d,\"wrap_check\":1}",
-        MESSAGE_INPUT_MAX_CHARS, message_char_capacity_for_current_font(), MESSAGE_MAX_LINES,
-        MESSAGE_TEXT_W, MESSAGE_DEFAULT_DURATION_SECONDS);
-    return ipc_send_json(client, 200, body);
-}
-
-static int ipc_message_fit(int client, const struct mp_ipc_message_fit *request) {
+static int ipc_message_preview(int client, const struct mp_ipc_display_message *request) {
+    char image_file[IMAGE_FILE_MAX];
     char text[192];
+    mp_safe_str(image_file, sizeof(image_file), request->image_file);
     mp_safe_str(text, sizeof(text), request->text);
-    sanitize_message_text(text);
+    sanitize_message_text(text, sizeof(text));
+
+    if (request->image_bedtime != 0 && request->image_bedtime != 1)
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid image library\"}");
+    if (image_file[0] && !safe_image_filename(image_file))
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid image filename\"}");
+
     char reason[160] = "";
-    int ok = message_fits_display(text, reason, sizeof(reason));
-    char font_file[128];
-    int px_size = 18, scale = MESSAGE_FALLBACK_SCALE, use_ttf = 0;
-    message_layout_params(font_file, sizeof(font_file), &px_size, &scale, &use_ttf);
-    char lines[MESSAGE_MAX_LINES][MESSAGE_LINE_CHARS];
-    memset(lines, 0, sizeof(lines));
-    int line_count = wrap_message_lines(use_ttf ? font_file : "", px_size, text,
-                                        MESSAGE_TEXT_W, lines, MESSAGE_MAX_LINES, scale);
-    if (!text[0]) line_count = 0;
-    struct mp_buffer body;
-    if (mp_buffer_init(&body, 1024, 8192) != 0)
-        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
-    mp_buffer_appendf(&body,
-        "{\"ok\":%d,\"chars\":%d,\"max_chars\":%d,\"advisory_chars\":%d,\"wrap_check\":1,\"max_lines\":%d,\"line_count\":%d,\"text_x\":%d,\"text_w\":%d,\"face_x\":0,\"face_y\":0,\"face_size\":64,\"reason\":\"",
-        ok, (int)strlen(text), MESSAGE_INPUT_MAX_CHARS, message_char_capacity_for_current_font(),
-        MESSAGE_MAX_LINES, line_count, MESSAGE_TEXT_X, MESSAGE_TEXT_W);
-    mp_buffer_append_json_string(&body, reason);
-    mp_buffer_append(&body, "\",\"lines\":[");
-    for (int i = 0; i < line_count && i < MESSAGE_MAX_LINES && !body.failed; i++) {
-        mp_buffer_appendf(&body, "%s\"", i ? "," : "");
-        mp_buffer_append_json_string(&body, lines[i]);
-        mp_buffer_append(&body, "\"");
+    if (text[0] && !message_fits_display(text, reason, sizeof(reason))) {
+        struct mp_buffer body;
+        if (mp_buffer_init(&body, 256, 1024) != 0)
+            return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+        mp_buffer_append(&body, "{\"ok\":false,\"error\":\"");
+        mp_buffer_append_json_string(&body, reason[0] ? reason : "Message does not fit on the OLED.");
+        mp_buffer_append(&body, "\"}");
+        return ipc_send_builder(client, 422, &body);
     }
-    mp_buffer_append(&body, "]}");
-    return ipc_send_builder(client, 200, &body);
+
+    uint8_t snapshot[OLED_FB_BYTES];
+    memset(snapshot, 0, sizeof(snapshot));
+    uint8_t *previous_target = g_oled_render_fb;
+    g_oled_render_fb = snapshot;
+    int rc = render_message_screen_file(image_file, request->image_bedtime ? 1 : 0, text, 0);
+    g_oled_render_fb = previous_target;
+    if (rc != 0)
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"message preview failed\"}");
+
+    int brightness_percent;
+    pthread_mutex_lock(&g_state.lock);
+    brightness_percent = g_state.oled_brightness_current;
+    pthread_mutex_unlock(&g_state.lock);
+    oled_apply_brightness_to_buffer(snapshot, sizeof(snapshot), brightness_percent);
+    return ipc_send_response(client, 200, MP_IPC_CONTENT_BINARY, snapshot, sizeof(snapshot));
 }
 
 static int ipc_display_action(int client, const struct mp_ipc_display_action *request) {
@@ -3611,16 +4731,36 @@ static int ipc_display_action(int client, const struct mp_ipc_display_action *re
             app_log("action", "Clear screen requested");
             break;
         case MP_IPC_ACTION_STOP_AUDIO:
-            audio_request_stop();
-            app_log("action", "Stop audio requested");
+            if (audio_is_alarm_session())
+                return ipc_send_json(client, 409,
+                    "{\"ok\":false,\"error\":\"Press the touch sensor on the clock to stop the alarm\"}");
+            (void)audio_request_stop();
+            app_log("action", "Stop music requested");
             break;
         case MP_IPC_ACTION_PLAY_MUSIC: {
             int volume;
             pthread_mutex_lock(&g_state.lock);
             volume = g_state.global_volume;
             pthread_mutex_unlock(&g_state.lock);
-            audio_play_music_file(request->file, volume, volume, 0);
+            int result = audio_play_music_file(request->file, volume, volume, 0);
+            if (result == -2)
+                return ipc_send_json(client, 409,
+                    "{\"ok\":false,\"error\":\"Music is disabled during bedtime hours\"}");
+            if (result != 0)
+                return ipc_send_json(client, 503,
+                    "{\"ok\":false,\"error\":\"No playable music is available\"}");
             app_log("action", "Play music requested: %s", request->file);
+            break;
+        }
+        case MP_IPC_ACTION_PLAY_STORY: {
+            int result = audio_play_story_file(request->file);
+            if (result == -2)
+                return ipc_send_json(client, 409,
+                    "{\"ok\":false,\"error\":\"Story mode is disabled\"}");
+            if (result != 0)
+                return ipc_send_json(client, 503,
+                    "{\"ok\":false,\"error\":\"No playable story is available\"}");
+            app_log("action", "Play story requested: %s", request->file);
             break;
         }
         default:
@@ -3629,64 +4769,79 @@ static int ipc_display_action(int client, const struct mp_ipc_display_action *re
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
-static int ipc_display_face(int client, const struct mp_ipc_display_face *request) {
-    int id = face_id_valid_int(request->id) ? request->id : 1;
-    char file[FACE_FILE_MAX];
-    if (safe_face_filename(request->file)) mp_safe_str(file, sizeof(file), request->file);
-    else snprintf(file, sizeof(file), "face_%03d.raw", id);
-    pthread_mutex_lock(&g_state.lock);
-    g_state.display_mode = 0;
-    g_state.current_face = id;
-    mp_safe_str(g_state.current_face_file, sizeof(g_state.current_face_file), file);
-    mp_safe_str(g_state.preview_face_file, sizeof(g_state.preview_face_file), file);
-    g_state.preview_face_bedtime = 0;
-    g_state.preview_face_until = time(NULL) + CLOCK_FACE_PREVIEW_SECONDS;
-    g_state.display_dirty = 1;
-    pthread_mutex_unlock(&g_state.lock);
-    app_log("faces", "Show face requested: %s", file);
-    return ipc_send_json(client, 200, "{\"ok\":true,\"mode\":\"face\"}");
-}
-
 static int valid_message_delay(unsigned int seconds) {
     return seconds == 0 || seconds == 10 || seconds == 30 || seconds == MESSAGE_DELAY_MAX_SECONDS;
 }
 
 static void activate_pending_message_if_due(void) {
     time_t now = time(NULL);
+    int activated = 0;
+    int notification_sound = 0;
     pthread_mutex_lock(&g_state.lock);
     if (g_state.pending_message_at > 0 && now >= g_state.pending_message_at) {
-        g_state.display_mode = 3;
-        g_state.message_face = g_state.pending_message_face;
-        safe_str(g_state.message_face_file, sizeof(g_state.message_face_file),
-                 g_state.pending_message_face_file);
+        g_state.display_mode = 2;
+        safe_str(g_state.message_image_file, sizeof(g_state.message_image_file),
+                 g_state.pending_message_image_file);
+        g_state.message_image_bedtime = g_state.pending_message_image_bedtime;
         safe_str(g_state.message_text, sizeof(g_state.message_text),
                  g_state.pending_message_text);
         g_state.message_until = now + MESSAGE_DEFAULT_DURATION_SECONDS;
+        notification_sound = g_state.pending_message_notification_sound;
         g_state.pending_message_at = 0;
-        g_state.pending_message_face_file[0] = '\0';
+        g_state.pending_message_image_file[0] = '\0';
+        g_state.pending_message_image_bedtime = 0;
+        g_state.pending_message_notification_sound = 0;
         g_state.pending_message_text[0] = '\0';
         g_state.display_dirty = 1;
+        activated = 1;
     }
     pthread_mutex_unlock(&g_state.lock);
+    if (activated) {
+        save_config();
+        if (notification_sound) {
+            int chime_result = audio_play_message_chime();
+            if (chime_result == -4)
+                app_log("message", "Message chime skipped because audio is already playing");
+            else if (chime_result != 0)
+                app_log("message", "Message chime could not be played");
+        }
+    }
 }
 
 static int ipc_display_message(int client, const struct mp_ipc_display_message *request) {
-    char face_file[FACE_FILE_MAX] = "";
+    char image_file[IMAGE_FILE_MAX] = "";
     char message[192];
     unsigned int delay_seconds = request->delay_seconds;
+    int image_bedtime = request->image_bedtime ? 1 : 0;
+    int notification_sound = request->notification_sound ? 1 : 0;
+    uint64_t requested_at = request->scheduled_at;
     if (!valid_message_delay(delay_seconds))
         return ipc_send_json(client, 400,
             "{\"ok\":false,\"error\":\"delay_seconds must be 0, 10, 30, or 60\"}");
-    if (safe_face_filename(request->face_file)) mp_safe_str(face_file, sizeof(face_file), request->face_file);
-    if (!face_file[0]) {
-        if (face_id_valid_int(request->face_id)) snprintf(face_file, sizeof(face_file), "face_%03d.raw", request->face_id);
-        else if (random_uploaded_face_file(face_file, sizeof(face_file)) != 0) face_file[0] = '\0';
+    if (requested_at && delay_seconds)
+        return ipc_send_json(client, 400,
+            "{\"ok\":false,\"error\":\"use either delay or scheduled time\"}");
+    if (request->image_file[0]) {
+        if (!safe_image_filename(request->image_file))
+            return ipc_send_json(client, 400,
+                "{\"ok\":false,\"error\":\"invalid image filename\"}");
+        char image_path[512];
+        if (make_image_path_by_file(request->image_file, image_bedtime,
+                                    image_path, sizeof(image_path)) != 0 ||
+            access(image_path, R_OK) != 0)
+            return ipc_send_json(client, 404,
+                "{\"ok\":false,\"error\":\"image not found\"}");
+        mp_safe_str(image_file, sizeof(image_file), request->image_file);
+    } else if (random_image_file(image_bedtime, image_file, sizeof(image_file)) != 0) {
+        image_file[0] = '\0';
     }
     mp_safe_str(message, sizeof(message), request->text);
-    sanitize_message_text(message);
-    if (!message[0]) mp_safe_str(message, sizeof(message), "Hello");
+    sanitize_message_text(message, sizeof(message));
+    if (!message[0] && !image_file[0])
+        return ipc_send_json(client, 400,
+            "{\"ok\":false,\"error\":\"choose an image or enter a message\"}");
     char reason[160] = "";
-    if (!message_fits_display(message, reason, sizeof(reason))) {
+    if (message[0] && !message_fits_display(message, reason, sizeof(reason))) {
         struct mp_buffer body;
         if (mp_buffer_init(&body, 256, 1024) != 0)
             return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
@@ -3698,36 +4853,56 @@ static int ipc_display_message(int client, const struct mp_ipc_display_message *
     }
 
     time_t now = time(NULL);
+    time_t scheduled_at = requested_at ? (time_t)requested_at :
+                          (delay_seconds ? now + (time_t)delay_seconds : 0);
+    if (requested_at && ((uint64_t)scheduled_at != requested_at || scheduled_at <= now ||
+        scheduled_at > now + (time_t)(30 * 24 * 60 * 60)))
+        return ipc_send_json(client, 400,
+            "{\"ok\":false,\"error\":\"specific time must be within the next 30 days\"}");
     pthread_mutex_lock(&g_state.lock);
-    if (delay_seconds == 0) {
-        g_state.display_mode = 3;
-        g_state.message_face = face_id_valid_int(request->face_id) ? request->face_id : 1;
-        mp_safe_str(g_state.message_face_file, sizeof(g_state.message_face_file), face_file);
+    if (scheduled_at == 0) {
+        g_state.display_mode = 2;
+        mp_safe_str(g_state.message_image_file, sizeof(g_state.message_image_file), image_file);
+        g_state.message_image_bedtime = image_bedtime;
         g_state.message_until = now + MESSAGE_DEFAULT_DURATION_SECONDS;
         mp_safe_str(g_state.message_text, sizeof(g_state.message_text), message);
         g_state.pending_message_at = 0;
-        g_state.pending_message_face_file[0] = '\0';
+        g_state.pending_message_image_file[0] = '\0';
+        g_state.pending_message_image_bedtime = 0;
+        g_state.pending_message_notification_sound = 0;
         g_state.pending_message_text[0] = '\0';
         g_state.display_dirty = 1;
     } else {
-        g_state.pending_message_face = face_id_valid_int(request->face_id) ? request->face_id : 1;
-        mp_safe_str(g_state.pending_message_face_file, sizeof(g_state.pending_message_face_file), face_file);
+        mp_safe_str(g_state.pending_message_image_file, sizeof(g_state.pending_message_image_file), image_file);
+        g_state.pending_message_image_bedtime = image_bedtime;
+        g_state.pending_message_notification_sound = notification_sound;
         mp_safe_str(g_state.pending_message_text, sizeof(g_state.pending_message_text), message);
-        g_state.pending_message_at = now + (time_t)delay_seconds;
+        g_state.pending_message_at = scheduled_at;
     }
     pthread_mutex_unlock(&g_state.lock);
+    save_config();
 
-    if (delay_seconds == 0) {
-        app_log("message", "Sent message with face %s: %.120s", face_file[0] ? face_file : "default", message);
+    if (scheduled_at == 0) {
+        if (notification_sound) {
+            int chime_result = audio_play_message_chime();
+            if (chime_result == -4)
+                app_log("message", "Message chime skipped because audio is already playing");
+            else if (chime_result != 0)
+                app_log("message", "Message chime could not be played");
+        }
+        app_log("message", "Sent message with %s image %s: %.120s",
+                image_bedtime ? "bedtime" : "day",
+                image_file[0] ? image_file : "none", message);
         return ipc_send_json(client, 200, "{\"ok\":true,\"mode\":\"message\",\"delay_seconds\":0}");
     }
 
-    app_log("message", "Scheduled message in %u seconds with face %s: %.120s",
-            delay_seconds, face_file[0] ? face_file : "default", message);
-    char response[192];
+    app_log("message", "Scheduled message for %lld with %s image %s: %.120s",
+            (long long)scheduled_at, image_bedtime ? "bedtime" : "day",
+            image_file[0] ? image_file : "none", message);
+    char response[224];
     snprintf(response, sizeof(response),
              "{\"ok\":true,\"mode\":\"scheduled-message\",\"delay_seconds\":%u,\"scheduled_for\":%lld}",
-             delay_seconds, (long long)(now + (time_t)delay_seconds));
+             delay_seconds, (long long)scheduled_at);
     return ipc_send_json(client, 200, response);
 }
 
@@ -3750,7 +4925,6 @@ static int ipc_config_alarm(int client, const struct mp_ipc_alarm_config *reques
     }
     pthread_mutex_lock(&g_state.lock);
     g_state.alarms[id - 1] = alarm;
-    sync_legacy_alarm_fields_locked();
     pthread_mutex_unlock(&g_state.lock);
     save_config();
     app_log("alarm", "Saved alarm %d", id);
@@ -3761,6 +4935,10 @@ static int ipc_config_audio(int client, const struct mp_ipc_audio_config *reques
     int changed = 0;
     int volume = -1;
     int show_metadata = -1;
+    int story_enabled = -1;
+    int story_volume = -1;
+    char story_message[STORY_MESSAGE_MAX] = "";
+    int story_message_changed = 0;
     pthread_mutex_lock(&g_state.lock);
     if (request->present_mask & MP_IPC_AUDIO_GLOBAL_VOLUME) {
         volume = clamp_int(request->global_volume, 0, 100);
@@ -3773,12 +4951,36 @@ static int ipc_config_audio(int client, const struct mp_ipc_audio_config *reques
         g_state.display_dirty = 1;
         changed = 1;
     }
+    if (request->present_mask & MP_IPC_AUDIO_STORY_ENABLED) {
+        story_enabled = request->story_enabled ? 1 : 0;
+        g_state.story_mode_enabled = story_enabled;
+        g_state.display_mode = 0;
+        g_state.display_dirty = 1;
+        changed = 1;
+    }
+    if (request->present_mask & MP_IPC_AUDIO_STORY_VOLUME) {
+        story_volume = clamp_int(request->story_volume, 0, 100);
+        g_state.story_volume = story_volume;
+        changed = 1;
+    }
+    if (request->present_mask & MP_IPC_AUDIO_STORY_MESSAGE) {
+        safe_str(story_message, sizeof(story_message), request->story_message);
+        sanitize_message_text(story_message, sizeof(story_message));
+        if (!story_message[0]) safe_str(story_message, sizeof(story_message), "STORY MODE!");
+        safe_str(g_state.story_message, sizeof(g_state.story_message), story_message);
+        g_state.display_dirty = 1;
+        story_message_changed = 1;
+        changed = 1;
+    }
     pthread_mutex_unlock(&g_state.lock);
     if (!changed)
         return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"no audio settings supplied\"}");
     save_config();
     if (volume >= 0) app_log("music", "Saved global volume %d%%", volume);
     if (show_metadata >= 0) app_log("music", "Song metadata display %s", show_metadata ? "enabled" : "disabled");
+    if (story_enabled >= 0) app_log("story", "Story mode %s", story_enabled ? "enabled" : "disabled");
+    if (story_volume >= 0) app_log("story", "Saved story volume %d%%", story_volume);
+    if (story_message_changed) app_log("story", "Saved story screen message: %s", story_message);
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
@@ -3794,13 +4996,49 @@ static int ipc_config_personalization(int client, const struct mp_ipc_personaliz
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
+static int ipc_display_preview(int client) {
+    pthread_mutex_lock(&g_state.lock);
+    int oled_ok = g_state.oled_ok;
+    pthread_mutex_unlock(&g_state.lock);
+    if (!oled_ok)
+        return ipc_send_json(client, 503, "{\"ok\":false,\"error\":\"OLED unavailable\"}");
+
+    uint8_t snapshot[OLED_FB_BYTES];
+    pthread_mutex_lock(&g_oled.preview_lock);
+    memcpy(snapshot, g_oled.preview_fb, sizeof(snapshot));
+    pthread_mutex_unlock(&g_oled.preview_lock);
+    return ipc_send_response(client, 200, MP_IPC_CONTENT_BINARY, snapshot, sizeof(snapshot));
+}
+
+static int ipc_brightness_preview(int client, const struct mp_ipc_brightness_preview *request) {
+    int percent = clamp_int(request->percent, 0, 100);
+    int hold_seconds = clamp_int(request->hold_seconds, 1, 30);
+    pthread_mutex_lock(&g_state.lock);
+    if (!g_state.oled_ok) {
+        pthread_mutex_unlock(&g_state.lock);
+        return ipc_send_json(client, 503, "{\"ok\":false,\"error\":\"OLED unavailable\"}");
+    }
+    g_state.brightness_preview_percent = percent;
+    g_state.brightness_preview_until = time(NULL) + hold_seconds;
+    g_state.display_dirty = 1;
+    pthread_mutex_unlock(&g_state.lock);
+
+    /* The main OLED loop applies the preview. Keeping SPI writes on that thread
+       prevents a slider request from interleaving commands with a framebuffer flush. */
+    char body[96];
+    snprintf(body, sizeof(body), "{\"ok\":true,\"brightness_percent\":%d}", percent);
+    return ipc_send_json(client, 200, body);
+}
+
 static int ipc_config_display(int client, const struct mp_ipc_display_config *request) {
     pthread_mutex_lock(&g_state.lock);
     int font = g_state.oled_font;
     int font_size = g_state.oled_font_size;
     int bedtime_enabled = g_state.bedtime_enabled;
     int bedtime_dim = g_state.bedtime_dim_percent;
+    int bedtime_music_enabled = g_state.bedtime_music_enabled;
     int clock_mode = g_state.clock_24h_mode;
+    int oled_color = g_state.oled_color;
     int bsh = g_state.bedtime_start_hour;
     int bsm = g_state.bedtime_start_min;
     int beh = g_state.bedtime_end_hour;
@@ -3813,7 +5051,10 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
     if (request->present_mask & MP_IPC_DISPLAY_FONT_SIZE) font_size = clamp_int(request->oled_font_size, 18, 54);
     if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_ENABLED) bedtime_enabled = request->bedtime_enabled ? 1 : 0;
     if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_DIM) bedtime_dim = clamp_int(request->bedtime_dim_percent, 0, 100);
+    if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_MUSIC) bedtime_music_enabled = request->bedtime_music_enabled ? 1 : 0;
     if (request->present_mask & MP_IPC_DISPLAY_CLOCK_MODE) clock_mode = request->clock_24h_mode ? 1 : 0;
+    if (request->present_mask & MP_IPC_DISPLAY_OLED_COLOR)
+        oled_color = clamp_int(request->oled_color, MP_OLED_COLOR_YELLOW, MP_OLED_COLOR_WHITE);
     if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_START) {
         bsh = clamp_int(request->bedtime_start_hour, 0, 23);
         bsm = clamp_int(request->bedtime_start_minute, 0, 59);
@@ -3836,8 +5077,10 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
     g_state.oled_font = font;
     g_state.oled_font_size = font_size;
     g_state.clock_24h_mode = clock_mode;
+    g_state.oled_color = oled_color;
     g_state.bedtime_enabled = bedtime_enabled;
     g_state.bedtime_dim_percent = bedtime_dim;
+    g_state.bedtime_music_enabled = bedtime_music_enabled;
     g_state.bedtime_start_hour = bsh;
     g_state.bedtime_start_min = bsm;
     g_state.bedtime_end_hour = beh;
@@ -3853,18 +5096,13 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
 
 static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
     if (event->action == MP_IPC_ASSET_UPLOADED) {
-        if (event->kind == MP_IPC_ASSET_FACE) {
-            invalidate_normal_face_assets();
+        if (event->kind == MP_IPC_ASSET_IMAGE) {
+            invalidate_image_assets(0);
             pthread_mutex_lock(&g_state.lock);
-            g_state.display_mode = 0;
-            mp_safe_str(g_state.current_face_file, sizeof(g_state.current_face_file), event->file);
-            mp_safe_str(g_state.preview_face_file, sizeof(g_state.preview_face_file), event->file);
-            g_state.preview_face_bedtime = 0;
-            g_state.preview_face_until = time(NULL) + CLOCK_FACE_PREVIEW_SECONDS;
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
-        } else if (event->kind == MP_IPC_ASSET_BEDTIME_FACE) {
-            invalidate_bedtime_face_assets();
+        } else if (event->kind == MP_IPC_ASSET_BEDTIME_IMAGE) {
+            invalidate_image_assets(1);
             pthread_mutex_lock(&g_state.lock);
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
@@ -3878,17 +5116,46 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
         }
         app_log("assets", "Uploaded %u asset(s), first %s", event->count, event->file);
     } else if (event->action == MP_IPC_ASSET_DELETED) {
-        if (event->kind == MP_IPC_ASSET_FACE || event->kind == MP_IPC_ASSET_BEDTIME_FACE) {
-            int bedtime = event->kind == MP_IPC_ASSET_BEDTIME_FACE;
-            if (bedtime) invalidate_bedtime_face_assets(); else invalidate_normal_face_assets();
+        if (event->kind == MP_IPC_ASSET_IMAGE || event->kind == MP_IPC_ASSET_BEDTIME_IMAGE) {
+            int bedtime = event->kind == MP_IPC_ASSET_BEDTIME_IMAGE;
+            invalidate_image_assets(bedtime);
             pthread_mutex_lock(&g_state.lock);
-            if (!bedtime) {
-                if (strcmp(g_state.current_face_file, event->file) == 0) g_state.current_face_file[0] = '\0';
-                if (strcmp(g_state.message_face_file, event->file) == 0) g_state.message_face_file[0] = '\0';
-                if (strcmp(g_state.preview_face_file, event->file) == 0) g_state.preview_face_file[0] = '\0';
+            int config_changed = 0;
+            if (g_state.message_image_bedtime == bedtime &&
+                strcmp(g_state.message_image_file, event->file) == 0) {
+                g_state.message_image_file[0] = '\0';
+            }
+            if (g_state.pending_message_image_bedtime == bedtime &&
+                strcmp(g_state.pending_message_image_file, event->file) == 0) {
+                g_state.pending_message_image_file[0] = '\0';
+                config_changed = 1;
             }
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
+            if (config_changed) save_config();
+        } else if (event->kind == MP_IPC_ASSET_MUSIC || event->kind == MP_IPC_ASSET_STORY) {
+            int stop_audio = 0;
+            int config_changed = 0;
+            pthread_mutex_lock(&g_state.lock);
+            stop_audio = strcmp(g_state.audio_file, event->file) == 0;
+            pthread_mutex_unlock(&g_state.lock);
+            if (stop_audio) audio_stop();
+            pthread_mutex_lock(&g_state.lock);
+            if (stop_audio) {
+                g_state.audio_playing = 0;
+                g_state.audio_file[0] = '\0';
+            }
+            if (event->kind == MP_IPC_ASSET_MUSIC) {
+                for (int i = 0; i < MAX_ALARMS; i++) {
+                    if (strcmp(g_state.alarms[i].music_file, event->file) == 0) {
+                        g_state.alarms[i].music_file[0] = '\0';
+                        config_changed = 1;
+                    }
+                }
+            }
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            if (config_changed) save_config();
         } else if (event->kind == MP_IPC_ASSET_FONT) {
             pthread_mutex_lock(&g_state.lock);
             if (strcmp(g_state.oled_font_file, event->file) == 0) g_state.oled_font_file[0] = '\0';
@@ -3899,24 +5166,27 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
         }
         app_log("assets", "Deleted asset %s", event->file);
     } else if (event->action == MP_IPC_ASSET_DELETED_ALL) {
-        if (event->kind == MP_IPC_ASSET_FACE) {
-            invalidate_all_face_assets();
+        if (event->kind == MP_IPC_ASSET_IMAGE || event->kind == MP_IPC_ASSET_BEDTIME_IMAGE) {
+            int bedtime = event->kind == MP_IPC_ASSET_BEDTIME_IMAGE;
+            invalidate_image_assets(bedtime);
             pthread_mutex_lock(&g_state.lock);
-            g_state.current_face_file[0] = '\0';
-            g_state.message_face_file[0] = '\0';
-            g_state.preview_face_file[0] = '\0';
-            g_state.preview_face_until = 0;
+            if (g_state.message_image_bedtime == bedtime)
+                g_state.message_image_file[0] = '\0';
+            if (g_state.pending_message_image_bedtime == bedtime)
+                g_state.pending_message_image_file[0] = '\0';
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
-        } else if (event->kind == MP_IPC_ASSET_MUSIC) {
+            save_config();
+        } else if (event->kind == MP_IPC_ASSET_MUSIC || event->kind == MP_IPC_ASSET_STORY) {
             audio_stop();
             pthread_mutex_lock(&g_state.lock);
             g_state.audio_playing = 0;
             g_state.audio_file[0] = '\0';
-            for (int i = 0; i < MAX_ALARMS; i++) g_state.alarms[i].music_file[0] = '\0';
+            if (event->kind == MP_IPC_ASSET_MUSIC)
+                for (int i = 0; i < MAX_ALARMS; i++) g_state.alarms[i].music_file[0] = '\0';
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
-            save_config();
+            if (event->kind == MP_IPC_ASSET_MUSIC) save_config();
         }
         app_log("assets", "Deleted all assets of kind %u (%u files)", event->kind, event->count);
     } else {
@@ -3930,12 +5200,153 @@ static int ipc_asset_state(int client) {
     memset(&state, 0, sizeof(state));
     pthread_mutex_lock(&g_state.lock);
     state.global_volume = g_state.global_volume;
+    state.story_volume = g_state.story_volume;
+    state.story_enabled = g_state.story_mode_enabled;
+    safe_str(state.story_message, sizeof(state.story_message), g_state.story_message);
     state.builtin_font = g_state.oled_font;
     state.font_size = g_state.oled_font_size;
     mp_safe_str(state.current_music, sizeof(state.current_music), g_state.audio_file);
     mp_safe_str(state.selected_font, sizeof(state.selected_font), g_state.oled_font_file);
     pthread_mutex_unlock(&g_state.lock);
     return ipc_send_response(client, 200, MP_IPC_CONTENT_BINARY, &state, sizeof(state));
+}
+
+static int ipc_config_led(int client, const struct mp_ipc_led_config *request) {
+    if (request->scene >= MP_LED_SCENE_COUNT)
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid LED scene\"}");
+
+    struct mp_led_profile profile = request->profile;
+    sanitize_led_profile(&profile);
+    pthread_mutex_lock(&g_state.lock);
+    g_state.led_profiles[request->scene] = profile;
+    pthread_mutex_unlock(&g_state.lock);
+    save_config();
+    update_led_scene();
+    app_log("lighting", "Saved %s LED profile: %s at %u%%",
+            mp_led_scene_name((enum mp_led_scene)request->scene),
+            mp_led_effect_name((enum mp_led_effect)profile.effect), profile.brightness);
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
+
+static int ipc_config_led_global(int client, const struct mp_ipc_led_global_config *request) {
+    struct mp_led_global_settings settings = request->settings;
+    sanitize_led_settings(&settings);
+    pthread_mutex_lock(&g_state.lock);
+    g_state.led_settings = settings;
+    pthread_mutex_unlock(&g_state.lock);
+    save_config();
+    update_led_scene();
+    app_log("lighting", "Saved global LED settings: %s, max %u%%, gains %u/%u/%u",
+            settings.enabled ? "enabled" : "disabled", settings.max_brightness,
+            settings.red_gain, settings.green_gain, settings.blue_gain);
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
+
+static int ipc_led_preview(int client, const struct mp_ipc_led_preview *request) {
+    if (request->scene >= MP_LED_SCENE_COUNT)
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid LED scene\"}");
+    if (!mp_led_ready())
+        return ipc_send_json(client, 503, "{\"ok\":false,\"error\":\"RGB LED unavailable\"}");
+
+    struct mp_led_profile profile = request->profile;
+    sanitize_led_profile(&profile);
+    int hold_seconds = clamp_int(request->hold_seconds, 1, 30);
+    pthread_mutex_lock(&g_state.lock);
+    g_state.led_preview_scene = request->scene;
+    g_state.led_preview_profile = profile;
+    g_state.led_preview_bypass_master = request->bypass_master ? 1 : 0;
+    g_state.led_preview_raw_output = request->raw_output ? 1 : 0;
+    g_state.led_preview_until = time(NULL) + hold_seconds;
+    pthread_mutex_unlock(&g_state.lock);
+    update_led_scene();
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
+
+static int ipc_config_export(int client) {
+    save_config();
+    int fd = open(CONFIG_FILE, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be read\"}");
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > MP_IPC_CONFIG_MAX_BYTES) {
+        close(fd);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration is too large\"}");
+    }
+    char *data = malloc((size_t)st.st_size ? (size_t)st.st_size : 1u);
+    if (!data) {
+        close(fd);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    }
+    ssize_t got = read(fd, data, (size_t)st.st_size);
+    close(fd);
+    if (got != st.st_size) {
+        free(data);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be read\"}");
+    }
+    int rc = ipc_send_response(client, 200, MP_IPC_CONTENT_TEXT, data, (size_t)got);
+    free(data);
+    return rc;
+}
+
+static int config_blob_valid(const struct mp_ipc_config_blob *blob) {
+    if (!blob || blob->length == 0 || blob->length > MP_IPC_CONFIG_MAX_BYTES) return 0;
+    for (uint32_t i = 0; i < blob->length; i++) {
+        unsigned char ch = (unsigned char)blob->data[i];
+        if (ch == 0) return 0;
+        if (ch < 0x09 || (ch > 0x0d && ch < 0x20)) return 0;
+    }
+    return 1;
+}
+
+static int ipc_config_import(int client, const struct mp_ipc_config_blob *blob) {
+    if (!config_blob_valid(blob))
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"backup configuration is invalid\"}");
+    (void)audio_force_stop_and_wait(3000u);
+    ensure_dir(CONFIG_DIR);
+    char tmp_path[512];
+    snprintf(tmp_path, sizeof(tmp_path), CONFIG_FILE ".restore");
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0640);
+    int failed = fd < 0;
+    if (!failed && (write_all(fd, blob->data, blob->length) != 0 || fsync(fd) != 0)) failed = 1;
+    if (fd >= 0 && close(fd) != 0) failed = 1;
+    if (failed) {
+        unlink(tmp_path);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be restored\"}");
+    }
+    if (rename(tmp_path, CONFIG_FILE) != 0) {
+        unlink(tmp_path);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be activated\"}");
+    }
+    pthread_mutex_lock(&g_state.lock);
+    reset_persistent_state_locked();
+    pthread_mutex_unlock(&g_state.lock);
+    load_config();
+    font_cache_reset();
+    invalidate_image_assets(0);
+    invalidate_image_assets(1);
+    pthread_mutex_lock(&g_state.lock);
+    g_state.display_mode = 0;
+    g_state.display_dirty = 1;
+    pthread_mutex_unlock(&g_state.lock);
+    save_config();
+    update_led_scene();
+    app_log("backup", "Configuration restored from backup");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
+
+static int ipc_factory_reset(int client) {
+    (void)audio_force_stop_and_wait(3000u);
+    pthread_mutex_lock(&g_state.lock);
+    reset_persistent_state_locked();
+    pthread_mutex_unlock(&g_state.lock);
+    font_cache_reset();
+    invalidate_image_assets(0);
+    invalidate_image_assets(1);
+    save_config();
+    update_led_scene();
+    app_log("system", "Factory reset completed");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
 static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t payload_len) {
@@ -3947,18 +5358,12 @@ static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t
         case MP_IPC_OP_DISPLAY_ACTION:
             EXPECT(struct mp_ipc_display_action);
             return ipc_display_action(client, payload);
-        case MP_IPC_OP_DISPLAY_FACE:
-            EXPECT(struct mp_ipc_display_face);
-            return ipc_display_face(client, payload);
         case MP_IPC_OP_DISPLAY_MESSAGE:
             EXPECT(struct mp_ipc_display_message);
             return ipc_display_message(client, payload);
-        case MP_IPC_OP_MESSAGE_LIMITS:
-            if (payload_len != 0) return ipc_bad_payload(client);
-            return ipc_message_limits(client);
-        case MP_IPC_OP_MESSAGE_FIT:
-            EXPECT(struct mp_ipc_message_fit);
-            return ipc_message_fit(client, payload);
+        case MP_IPC_OP_MESSAGE_PREVIEW:
+            EXPECT(struct mp_ipc_display_message);
+            return ipc_message_preview(client, payload);
         case MP_IPC_OP_CONFIG_ALARM:
             EXPECT(struct mp_ipc_alarm_config);
             return ipc_config_alarm(client, payload);
@@ -3986,6 +5391,30 @@ static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t
         case MP_IPC_OP_PING:
             if (payload_len != 0) return ipc_bad_payload(client);
             return ipc_send_json(client, 200, "{\"ok\":true}");
+        case MP_IPC_OP_DISPLAY_PREVIEW:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_display_preview(client);
+        case MP_IPC_OP_BRIGHTNESS_PREVIEW:
+            EXPECT(struct mp_ipc_brightness_preview);
+            return ipc_brightness_preview(client, payload);
+        case MP_IPC_OP_CONFIG_EXPORT:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_config_export(client);
+        case MP_IPC_OP_CONFIG_IMPORT:
+            EXPECT(struct mp_ipc_config_blob);
+            return ipc_config_import(client, payload);
+        case MP_IPC_OP_FACTORY_RESET:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_factory_reset(client);
+        case MP_IPC_OP_CONFIG_LED:
+            EXPECT(struct mp_ipc_led_config);
+            return ipc_config_led(client, payload);
+        case MP_IPC_OP_CONFIG_LED_GLOBAL:
+            EXPECT(struct mp_ipc_led_global_config);
+            return ipc_config_led_global(client, payload);
+        case MP_IPC_OP_LED_PREVIEW:
+            EXPECT(struct mp_ipc_led_preview);
+            return ipc_led_preview(client, payload);
         default:
             return ipc_send_json(client, 404, "{\"ok\":false,\"error\":\"unknown IPC opcode\"}");
     }
@@ -4028,21 +5457,28 @@ static int ipc_peer_allowed(int client, uid_t api_uid) {
 static ssize_t ipc_expected_payload_size(uint16_t opcode) {
     switch (opcode) {
         case MP_IPC_OP_STATUS:
-        case MP_IPC_OP_MESSAGE_LIMITS:
         case MP_IPC_OP_LOGS_GET:
         case MP_IPC_OP_LOGS_CLEAR:
         case MP_IPC_OP_ASSET_STATE:
         case MP_IPC_OP_PING:
+        case MP_IPC_OP_DISPLAY_PREVIEW:
+        case MP_IPC_OP_CONFIG_EXPORT:
+        case MP_IPC_OP_FACTORY_RESET:
             return 0;
         case MP_IPC_OP_DISPLAY_ACTION: return sizeof(struct mp_ipc_display_action);
-        case MP_IPC_OP_DISPLAY_FACE: return sizeof(struct mp_ipc_display_face);
-        case MP_IPC_OP_DISPLAY_MESSAGE: return sizeof(struct mp_ipc_display_message);
-        case MP_IPC_OP_MESSAGE_FIT: return sizeof(struct mp_ipc_message_fit);
+        case MP_IPC_OP_BRIGHTNESS_PREVIEW: return sizeof(struct mp_ipc_brightness_preview);
+        case MP_IPC_OP_DISPLAY_MESSAGE:
+        case MP_IPC_OP_MESSAGE_PREVIEW:
+            return sizeof(struct mp_ipc_display_message);
         case MP_IPC_OP_CONFIG_ALARM: return sizeof(struct mp_ipc_alarm_config);
         case MP_IPC_OP_CONFIG_AUDIO: return sizeof(struct mp_ipc_audio_config);
         case MP_IPC_OP_CONFIG_PERSONALIZATION: return sizeof(struct mp_ipc_personalization_config);
         case MP_IPC_OP_CONFIG_DISPLAY: return sizeof(struct mp_ipc_display_config);
         case MP_IPC_OP_ASSET_EVENT: return sizeof(struct mp_ipc_asset_event);
+        case MP_IPC_OP_CONFIG_IMPORT: return sizeof(struct mp_ipc_config_blob);
+        case MP_IPC_OP_CONFIG_LED: return sizeof(struct mp_ipc_led_config);
+        case MP_IPC_OP_LED_PREVIEW: return sizeof(struct mp_ipc_led_preview);
+        case MP_IPC_OP_CONFIG_LED_GLOBAL: return sizeof(struct mp_ipc_led_global_config);
         default: return -1;
     }
 }
@@ -4150,6 +5586,18 @@ static void *ipc_thread_main(void *arg) {
 
 /* ---------------- Main loop ---------------- */
 
+static void enforce_bedtime_music_policy(void) {
+    int allow_music;
+    int playing;
+    pthread_mutex_lock(&g_state.lock);
+    allow_music = g_state.bedtime_music_enabled;
+    playing = g_state.audio_playing;
+    pthread_mutex_unlock(&g_state.lock);
+    if (!allow_music && playing && is_bedtime_now() && !audio_is_alarm_session()) {
+        if (audio_request_stop()) app_log("music", "Music stopped because bedtime began");
+    }
+}
+
 static void check_alarm(void) {
     time_t now = time(NULL);
     struct tm tmv;
@@ -4169,13 +5617,14 @@ static void check_alarm(void) {
             break;
         }
     }
-    sync_legacy_alarm_fields_locked();
     if (fire) g_state.display_mode = 0;
     pthread_mutex_unlock(&g_state.lock);
 
     if (fire) {
         app_log("alarm", "Alarm fired at %02d:%02d", fire_alarm.hour, fire_alarm.min);
-        audio_play_music_file(fire_alarm.music_file, fire_alarm.start_volume, fire_alarm.end_volume, 1);
+        if (audio_play_music_file(fire_alarm.music_file, fire_alarm.start_volume,
+                                  fire_alarm.end_volume, 1) != 0)
+            app_log("alarm", "Alarm could not start because no playable audio was available");
     }
 }
 
@@ -4192,9 +5641,10 @@ int main(void) {
     srand((unsigned int)(time(NULL) ^ getpid()));
 
     ensure_dir(APP_ROOT);
-    ensure_dir(FACE_DIR);
-    ensure_dir(BEDTIME_FACE_DIR);
+    ensure_dir(IMAGE_DIR);
+    ensure_dir(BEDTIME_IMAGE_DIR);
     ensure_dir(MUSIC_DIR);
+    ensure_dir(STORY_DIR);
     ensure_dir(FONT_DIR);
     ensure_dir(CONFIG_DIR);
     init_alarm_defaults();
@@ -4205,11 +5655,21 @@ int main(void) {
     if (touch_available) app_log("system", "TTP223B touch input initialized on GPIO %d", GPIO_TOUCH);
     else app_log("system", "TTP223B touch input unavailable on GPIO %d", GPIO_TOUCH);
 
+    int led_available = (mp_led_init() == 0);
+    if (led_available)
+        app_log("system", "Common-cathode RGB LED initialized on GPIO %d/%d/%d",
+                MP_LED_GPIO_RED, MP_LED_GPIO_GREEN, MP_LED_GPIO_BLUE);
+    else
+        app_log("system", "RGB LED unavailable on GPIO %d/%d/%d",
+                MP_LED_GPIO_RED, MP_LED_GPIO_GREEN, MP_LED_GPIO_BLUE);
+    update_led_scene();
+
     if (oled_init() == 0) {
         pthread_mutex_lock(&g_state.lock);
         g_state.oled_ok = 1;
         pthread_mutex_unlock(&g_state.lock);
         app_log("system", "OLED initialized");
+        apply_bedtime_brightness();
         draw_startup_screen();
         sleep(STARTUP_GREETING_SECONDS);
         draw_clock_screen();
@@ -4239,34 +5699,34 @@ int main(void) {
 
     int last_min = -1;
     int last_mode = -1;
-    int last_face = -1;
     int last_colon_phase = -1;
-    char last_face_file[FACE_FILE_MAX] = "";
+    int last_story_phase = -1;
+    uint64_t last_diagnostic_refresh_ms = 0;
     while (g_running) {
         check_alarm();
         activate_pending_message_if_due();
         apply_bedtime_brightness();
+        enforce_bedtime_music_policy();
+        update_led_scene();
 
         pthread_mutex_lock(&g_state.lock);
         int mode = g_state.display_mode;
         int dirty = g_state.display_dirty;
         g_state.display_dirty = 0;
-        int face = g_state.current_face;
-        char face_file[FACE_FILE_MAX];
-        safe_str(face_file, sizeof(face_file), g_state.current_face_file);
         int oled_ok = g_state.oled_ok;
         pthread_mutex_unlock(&g_state.lock);
 
+        int marquee_active = 0;
         if (oled_ok) {
-            if (mode == 3) {
+            if (mode == 2) {
                 time_t until;
-                int msg_face;
-                char msg_face_file[FACE_FILE_MAX];
+                char msg_image_file[IMAGE_FILE_MAX];
+                int msg_image_bedtime;
                 char msg_text[192];
                 pthread_mutex_lock(&g_state.lock);
                 until = g_state.message_until;
-                msg_face = g_state.message_face;
-                safe_str(msg_face_file, sizeof(msg_face_file), g_state.message_face_file);
+                safe_str(msg_image_file, sizeof(msg_image_file), g_state.message_image_file);
+                msg_image_bedtime = g_state.message_image_bedtime;
                 safe_str(msg_text, sizeof(msg_text), g_state.message_text);
                 pthread_mutex_unlock(&g_state.lock);
 
@@ -4278,8 +5738,28 @@ int main(void) {
                     mode = 0;
                     last_mode = -1;
                 } else if (dirty || mode != last_mode) {
-                    if (msg_face_file[0]) draw_message_screen_file(msg_face_file, msg_text);
-                    else draw_message_screen(msg_face, msg_text);
+                    draw_message_screen_file(msg_image_file, msg_image_bedtime, msg_text);
+                }
+            }
+
+            if (mode == 3) {
+                time_t diagnostic_until;
+                pthread_mutex_lock(&g_state.lock);
+                diagnostic_until = g_state.diagnostic_until;
+                pthread_mutex_unlock(&g_state.lock);
+                if (diagnostic_until <= 0 || time(NULL) >= diagnostic_until) {
+                    close_diagnostic_screen();
+                    pthread_mutex_lock(&g_state.lock);
+                    mode = g_state.display_mode;
+                    pthread_mutex_unlock(&g_state.lock);
+                    last_mode = -1;
+                } else {
+                    uint64_t diagnostic_now_ms = monotonic_millis();
+                    if (dirty || mode != last_mode ||
+                        diagnostic_now_ms - last_diagnostic_refresh_ms >= DIAGNOSTIC_REFRESH_MS) {
+                        draw_diagnostic_screen();
+                        last_diagnostic_refresh_ms = diagnostic_now_ms;
+                    }
                 }
             }
 
@@ -4288,11 +5768,15 @@ int main(void) {
                 struct tm tmv;
                 localtime_r(&now, &tmv);
                 int colon_phase = clock_colon_blink_phase();
-                if (dirty || mode != last_mode || tmv.tm_min != last_min || colon_phase != last_colon_phase || clock_face_refresh_due()) {
+                int story_phase = story_display_phase();
+                marquee_active = song_metadata_marquee_active();
+                if (dirty || mode != last_mode || tmv.tm_min != last_min || colon_phase != last_colon_phase ||
+                    story_phase != last_story_phase || clock_image_refresh_due()) {
                     last_min = tmv.tm_min;
                     last_colon_phase = colon_phase;
+                    last_story_phase = story_phase;
                     draw_clock_screen();
-                } else if (song_metadata_scroll_active()) {
+                } else if (marquee_active) {
                     refresh_clock_footer();
                 }
             } else if (mode == 1) {
@@ -4300,23 +5784,17 @@ int main(void) {
                     oled_clear_fb(0);
                     oled_flush_full();
                 }
-            } else if (mode == 2) {
-                if (dirty || mode != last_mode || face != last_face || strcmp(face_file, last_face_file) != 0) {
-                    if (face_file[0]) draw_face_screen_file(face_file);
-                    else draw_face_screen(face);
-                }
             }
         }
 
         last_mode = mode;
-        last_face = face;
-        safe_str(last_face_file, sizeof(last_face_file), face_file);
-        usleep(250000);
+        usleep(marquee_active ? SONG_SCROLL_FRAME_US : 250000u);
     }
 
     if (touch_thread_started) pthread_join(touch_thread, NULL);
     touch_close();
-    (void)audio_stop_and_wait(3000u);
+    (void)audio_force_stop_and_wait(3000u);
+    mp_led_shutdown();
     pthread_mutex_lock(&g_font.lock);
     font_cache_close_locked();
     pthread_mutex_unlock(&g_font.lock);

@@ -1,0 +1,139 @@
+<section class="panel system-module">
+    <div id="system-time-warning" class="card warning-card hidden" role="alert">
+        <h2>Clock time needs attention</h2>
+        <p class="no-margin">Network time is not synchronized. Fix the network or time service before relying on alarms.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title-row">
+            <div><h2>Web password</h2><p class="small no-margin">Optional protection for the clock controls.</p></div>
+            <span id="password-state" class="badge">Loading</span>
+        </div>
+        <form id="password-form" method="POST" action="/api/v1/auth/password" data-module-handles-submit="true">
+            <label for="new-web-password">New password</label>
+            <input id="new-web-password" name="password" type="password" maxlength="64" autocomplete="new-password" placeholder="Enter a simple password">
+            <div class="button-grid">
+                <button class="btn" type="submit">Save Password</button>
+                <button id="remove-password" class="btn alt" type="button">Remove Password</button>
+            </div>
+        </form>
+        <p class="small no-margin">No password means no prompt. The password is stored as plain text on this clock.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title-row">
+            <div><h2>Network</h2><p class="small no-margin">Live connection details from the clock.</p></div>
+            <span id="network-state" class="badge">Loading</span>
+        </div>
+        <table class="info-table"><tbody>
+            <tr><th>IP address</th><td id="diag-ip">Loading...</td></tr>
+            <tr><th>Hostname</th><td id="diag-hostname">Loading...</td></tr>
+            <tr><th>SSID</th><td id="diag-ssid">Loading...</td></tr>
+            <tr><th>Interface</th><td id="diag-interface">Loading...</td></tr>
+            <tr><th>Wi-Fi signal</th><td id="diag-signal">Loading...</td></tr>
+            <tr><th>NTP synchronized</th><td id="diag-ntp">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <h2>Platform</h2>
+        <table class="info-table"><tbody>
+            <tr><th>Release version</th><td id="diag-product-version">Loading...</td></tr>
+            <tr><th>API version</th><td id="diag-api-version">Loading...</td></tr>
+            <tr><th>Compiled</th><td id="diag-compiled">Loading...</td></tr>
+            <tr><th>Hardware</th><td id="diag-hardware">Loading...</td></tr>
+            <tr><th>Operating system</th><td id="diag-os">Loading...</td></tr>
+            <tr><th>OS release</th><td id="diag-os-release">Loading...</td></tr>
+            <tr><th>Kernel</th><td id="diag-kernel">Loading...</td></tr>
+            <tr><th>Architecture</th><td id="diag-architecture">Loading...</td></tr>
+            <tr><th>Uptime</th><td id="diag-uptime">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <h2>Device identity</h2>
+        <p class="small">Use the Inventory ID or Raspberry Pi serial for asset tracking. The CPU signature identifies the processor type and is not unique to this clock.</p>
+        <table class="info-table"><tbody>
+            <tr><th>Inventory ID</th><td id="diag-inventory-id">Loading...</td></tr>
+            <tr><th>Raspberry Pi serial</th><td id="diag-pi-serial" class="technical-value">Loading...</td></tr>
+            <tr><th>Board revision</th><td id="diag-board-revision">Loading...</td></tr>
+            <tr><th>OS machine ID</th><td id="diag-machine-id" class="technical-value">Loading...</td></tr>
+            <tr><th>CPU signature</th><td id="diag-cpu-signature" class="technical-value">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <h2>System storage</h2>
+        <table class="info-table"><tbody>
+            <tr><th>System drive</th><td id="diag-root-disk">Loading...</td></tr>
+            <tr><th>Root partition</th><td id="diag-root-device">Loading...</td></tr>
+            <tr><th>Root filesystem</th><td id="diag-root-filesystem">Loading...</td></tr>
+            <tr><th>Root state</th><td id="diag-root-state">Loading...</td></tr>
+            <tr><th>Used space</th><td id="diag-storage-used">Loading...</td></tr>
+            <tr><th>Available space</th><td id="diag-storage-available">Loading...</td></tr>
+            <tr><th>Total space</th><td id="diag-storage-total">Loading...</td></tr>
+            <tr><th>Day images</th><td id="diag-day-images">Loading...</td></tr>
+            <tr><th>Bedtime images</th><td id="diag-bedtime-images">Loading...</td></tr>
+            <tr><th>Music</th><td id="diag-music-size">Loading...</td></tr>
+            <tr><th>Stories</th><td id="diag-stories-size">Loading...</td></tr>
+            <tr><th>Fonts</th><td id="diag-fonts-size">Loading...</td></tr>
+            <tr><th>Boot partition</th><td id="diag-boot-device">Loading...</td></tr>
+            <tr><th>Boot filesystem</th><td id="diag-boot-filesystem">Loading...</td></tr>
+            <tr><th>Boot mount point</th><td id="diag-boot-mount">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <div class="card-title-row">
+            <div><h2>SD card</h2><p class="small no-margin">Identity reported by the Linux MMC driver.</p></div>
+            <span id="sd-card-state" class="badge">Loading</span>
+        </div>
+        <table class="info-table"><tbody>
+            <tr><th>Device</th><td id="diag-sd-device">Loading...</td></tr>
+            <tr><th>Type</th><td id="diag-sd-type">Loading...</td></tr>
+            <tr><th>Product name</th><td id="diag-sd-name">Loading...</td></tr>
+            <tr><th>Capacity</th><td id="diag-sd-capacity">Loading...</td></tr>
+            <tr><th>Manufacturer ID</th><td id="diag-sd-manufacturer">Loading...</td></tr>
+            <tr><th>OEM ID</th><td id="diag-sd-oem">Loading...</td></tr>
+            <tr><th>Serial</th><td id="diag-sd-serial">Loading...</td></tr>
+            <tr><th>Manufactured</th><td id="diag-sd-date">Loading...</td></tr>
+            <tr><th>CID</th><td id="diag-sd-cid" class="technical-value">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <h2>Clock health</h2>
+        <table class="info-table"><tbody>
+            <tr><th>API service</th><td id="diag-api">Loading...</td></tr>
+            <tr><th>Core service</th><td id="diag-core">Loading...</td></tr>
+            <tr><th>OLED</th><td id="diag-oled">Loading...</td></tr>
+            <tr><th>Touch sensor</th><td id="diag-touch">Loading...</td></tr>
+            <tr><th>CPU temperature</th><td id="diag-temperature">Loading...</td></tr>
+            <tr><th>Next alarm</th><td id="diag-next-alarm">Loading...</td></tr>
+            <tr><th>Last successful alarm</th><td id="diag-last-alarm">Loading...</td></tr>
+        </tbody></table>
+        <a class="btn alt report-button" href="/api/v1/diagnostics/report">Download Diagnostic Report</a>
+    </div>
+
+    <div class="card">
+        <h2>Backup and restore</h2>
+        <p class="page-intro">The backup contains settings, alarms, images, fonts, and scheduled message data. Music and stories are excluded.</p>
+        <a class="btn" href="/api/v1/backup/download">Download Backup</a>
+        <form id="restore-form" method="POST" action="/api/v1/backup/restore" enctype="multipart/form-data" data-module-handles-submit="true">
+            <label for="backup-file">Restore a backup</label>
+            <input id="backup-file" type="file" name="backup" accept=".zip,application/zip" required>
+            <button class="btn alt" type="submit">Restore Backup</button>
+        </form>
+        <p class="small no-margin">Restore replaces settings, images, and fonts. The music and story libraries are left unchanged.</p>
+    </div>
+
+    <div class="card danger-zone">
+        <h2>Factory reset</h2>
+        <p>Deletes user-added images, music, stories, fonts, alarms, and settings. The built-in alarm sound remains.</p>
+        <form id="factory-reset-form" method="POST" action="/api/v1/factory-reset" data-module-handles-submit="true">
+            <label for="factory-confirm">Type RESET</label>
+            <input id="factory-confirm" name="confirm" autocomplete="off" required>
+            <button class="btn danger" type="submit">Factory Reset</button>
+        </form>
+    </div>
+</section>

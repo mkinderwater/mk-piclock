@@ -1,0 +1,4 @@
+.dashboard-module .info-table th { width: 34%; }
+
+.dashboard-module .warning-card { border-color: #e5b24e; background: #fff3d7; color: #6d4300; }
+.dashboard-module .warning-card h2 { color: #7a4b05; }

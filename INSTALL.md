@@ -383,8 +383,7 @@ sudo apt install --no-install-recommends -y \
   libmp3lame-dev \
   libmicrohttpd-dev \
   alsa-utils \
-  unzip \
-  curl
+  unzip
 ```
 
 `libmp3lame-dev` provides the in-process MP3 encoder.

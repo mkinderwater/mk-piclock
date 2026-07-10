@@ -1,757 +1,365 @@
-# mk-piclock Kids
+# mk-piclock v1.7.5
 
-> A bedside clock built by a dad, for kids.
+mk-piclock is a native C bedside alarm clock for Raspberry Pi Zero and Zero 2 W. It drives a 256x64 SSD1322 OLED, MAX98357A I2S amplifier, speaker, TTP223B touch sensor, and optional RGB LED.
 
-| Product | Release | HTTP API | Private IPC |
-|:--|:--|:--|:--|
-| mk-piclock Kids | `1.7.1` | `1.16` | `11` |
+The project was created for my daughter Rylie. It is designed to behave like a simple bedside appliance, not a general-purpose computer.
 
-mk-piclock Kids is a Raspberry Pi alarm clock designed to be simple for a child and useful for a parent.
+## What's new in v1.7.5
 
-For the child, it is a clock, music player, story player, night light, and alarm.
+- Increased the OLED diagnostic hold from six to eight seconds, leaving a safer gap after the three-second music gesture.
+- Expanded this README so the optional password, message chime, OLED diagnostics, floating browser confirmations, and OLED metadata filtering are easy to find.
+- Retained clean OLED song metadata filtering. Unsupported characters are omitted while the original title and artist remain unchanged in the GUI and API.
+- Kept HTTP API 1.25 and private IPC 16.
 
-For the parent, it provides a private web page for setting alarms, uploading music and stories, controlling bedtime behaviour, sending messages, and checking that everything is working.
 
-The goal is not to put another screen, tablet, or voice assistant in a child's bedroom. The goal is to provide the useful parts of those devices without advertising, accounts, microphones, notifications, or unrestricted internet access.
+## Features
 
----
+### Clock and display
 
-## Why this clock exists
-
-Most children's clocks are either too basic or far too connected.
-
-mk-piclock Kids was created to provide:
-
-- a clear clock that can be read at night
-- alarms that use familiar music instead of harsh beeping
-- a simple touch control a child can understand
-- bedtime stories without handing over a phone or tablet
-- parent control from another device on the home network
-- no cloud account
-- no microphone
-- no advertisements
-- no subscription
-- no internet-facing control panel
-
-The clock is intended to feel like an appliance. Once it is set up, a child should not need to understand Raspberry Pi, Linux, Wi-Fi, or the web interface.
-
----
-
-## What the child can do
-
-The child uses one touch sensor on the clock.
-
-| Touch action | What happens |
-|:--|:--|
-| Short press | Stops the current alarm, song, or story |
-| Hold for three seconds | Plays a random song |
-| Ten rapid taps | Starts Story Mode |
-
-The RGB LED briefly flashes when a touch is recognized. This tells the child that the clock felt the press, even before the requested action begins.
-
-No menus, passwords, or screen navigation are required at the clock itself.
-
----
-
-## What the parent can do
-
-From a phone, tablet, or computer on the same home network, a parent can:
-
-- set up to seven alarms
-- choose which days each alarm runs
-- choose a specific alarm song or let the clock select one randomly
-- control alarm volume and volume ramping
-- upload several songs or stories in one batch
-- set separate music and story volumes
-- set bedtime hours
-- reduce display brightness at bedtime
-- disable normal music during bedtime
-- upload Day Images and Bedtime Images
-- send an immediate or scheduled message to the OLED
-- choose the clock font and display position
-- control the RGB night light
-- review recent activity
-- check Wi-Fi, storage, time synchronization, and service health
-- back up settings and artwork
-- restore a backup
-- perform a factory reset
-
-The web interface is intentionally organized around normal parent tasks. Technical details remain available, but they are not placed in the way of everyday controls.
-
----
-
-## Everyday behaviour
-
-### Clock display
-
-The 256x64 OLED can show:
-
-- 12-hour or 24-hour time
-- a large centred clock
-- a blinking colon
-- a full written date
-- Day Images
-- Bedtime Images
-- the next alarm
-- Wi-Fi status
-- alarm-enabled status
-- alarm volume while an alarm is playing
-- music or story title and artist
-- parent messages
-
-The display uses separate daytime and bedtime brightness settings.
-
-The browser preview is generated from the same framebuffer used by the physical OLED. This lets a parent see what will actually appear on the clock before saving a change or sending a message.
+- Large 12-hour or 24-hour clock
+- Full date under the time
+- Blinking colon
+- Day and bedtime image libraries
+- Automatic image rotation
+- Wi-Fi and alarm status indicators
+- Alarm volume indicator while an alarm is playing
+- OLED brightness control
+- Separate bedtime schedule and brightness
+- Yellow, green, or white panel selection for browser previews
+- Built-in and uploaded TrueType or OpenType fonts
+- Exact 256x64 live framebuffer preview on the Home page
 
 ### Alarms
 
-The clock provides seven independent alarm slots.
+- Seven independent alarm slots
+- Per-alarm time and weekday selection
+- Specific or random uploaded music
+- Separate starting and final volume
+- Volume ramp across the song
+- Next alarm shown on Home and System
+- Last successful alarm recorded on System
 
-Each alarm can have its own:
+#### Alarm safety
 
-- time
-- weekdays
-- enabled or disabled state
-- selected MP3
-- random MP3 option
-- starting volume
-- final volume
-- gradual volume ramp
+When an alarm starts:
 
-An alarm repeats until it is stopped or reaches the 30-minute safety limit.
+- the selected song repeats until the touch sensor is pressed
+- browser stop controls cannot dismiss the alarm
+- an unreadable or missing song falls back to the protected built-in alarm
+- the alarm stops after 30 minutes if nobody presses the sensor
 
-A short touch stops the alarm immediately.
+The fallback alarm is installed at:
 
-If the selected alarm file cannot be played, the clock uses fallback alarm audio rather than failing silently.
+```text
+/opt/mk-piclock/assets/default-alarm.mp3
+```
 
-The Home page shows the next active alarm, and the clock records its most recent successful alarm for diagnostics.
+It is retained during factory reset and is not part of the user music library.
 
-### Why alarms repeat
+### Kid-friendly touch control
 
-Children do not always wake up to the first few seconds of a song. Repeating the alarm prevents a short file or momentary distraction from causing the alarm to end before the child is awake.
+- Press while an alarm is active: dismiss the alarm
+- Short press while music or a story is playing: stop the audio
+- Hold for three seconds, then release before eight seconds: play a random song
+- Hold for eight seconds: open the OLED network diagnostic screen
+- Tap while diagnostics are open: close diagnostics
+- Ten short taps within eight seconds: play a random story when Story Mode is enabled
+- Any touch press: blink the RGB LED using the selected touch-feedback colour
 
-The 30-minute limit prevents an unattended alarm from playing forever.
+The music action runs only when the sensor is released. Continuing to hold past eight seconds opens diagnostics instead, so the same press cannot start music. A diagnostic hold is not counted toward Story Mode.
 
----
+Alarms cannot be dismissed from the browser. The physical touch sensor must be pressed.
 
-## Story Mode
+#### OLED network diagnostics
 
-Story Mode gives the child access to bedtime stories without a phone, tablet, smart speaker, or streaming service.
+The diagnostic screen shows:
 
-To start Story Mode, the child taps the sensor ten times.
+- Wi-Fi network name
+- Wi-Fi signal strength
+- IP address
+- hostname
 
-The clock then:
+It closes after 30 seconds or immediately when the touch sensor is tapped. Network values refresh while the screen is open.
 
-1. clears the normal clock display
-2. shows the Story Mode splash
-3. displays a grid of Bedtime Images
-4. selects a random story
-5. begins playback at the configured story volume
-6. shows the story title and artist
-7. scrolls long text when necessary
-8. returns to the normal clock while the story continues
+### Bedtime behaviour
 
-A short touch stops the story.
+Bedtime mode uses its own schedule, image library, and brightness. It lets the clock remain useful at night without keeping the OLED unnecessarily bright.
 
-Story Mode has:
+Day Images and Bedtime Images are stored separately. During bedtime, the clock uses bedtime artwork and the configured bedtime brightness. Parents can disable touch-started music during bedtime while leaving alarms enabled.
 
-- its own enable or disable setting
-- its own Stories library
-- its own volume
-- a configurable startup message
-- random story selection
-- a startup splash
-- title and artist display
-- scrolling metadata
-- touch-to-stop behaviour
+### Messages
 
-The Wi-Fi and alarm status pills are hidden during the Story Mode display so they do not interfere with the splash or story information.
-
-Touch input is briefly ignored during startup so the ten activation taps do not immediately stop the story.
-
-### Why stories are separate from music
-
-Songs and stories are stored in separate libraries so they can have different volumes, controls, and bedtime rules.
-
-A parent can maintain a music collection for daytime use and a calmer story collection for bedtime.
-
----
-
-## Music
-
-The child can hold the touch sensor for three seconds to play a random song.
-
-A short touch stops playback.
-
-The parent can also play, stop, upload, and delete music from the web interface.
-
-### Music library information
-
-The Music page can show:
-
-- title
-- artist
-- album
-- year
-- track
-- genre
-- duration
-- bitrate
-- sample rate
-- channel count
-- MPEG layer
-- file size
-- current playback state
-
-Long `Title - Artist` text scrolls across the OLED. Short text remains centred.
-
-### Uploading MP3 files
-
-> [!IMPORTANT]
-> Multiple MP3 files can be selected and uploaded together. The upload queue may contain several files. The Raspberry Pi processes and transcodes them sequentially, one file at a time.
-
-Several MP3 files may be selected and uploaded in one batch.
-
-Each file is checked separately.
-
-| Limit | Value |
-|:--|:--|
-| Maximum source size | 64 MiB per MP3 |
-| Exact limit | 67,108,864 bytes |
-| Limit applies to | Each original MP3 |
-| Files per selection | Multiple |
-| Files transcoded at once | One |
-
-The 64 MiB limit applies to each original file before processing. It is not a limit on the combined batch.
-
-For example, a batch containing four 20 MiB files is acceptable because each file is below the limit.
-
-A single 70 MiB file is rejected because that individual file exceeds the limit.
-
-### Why processing happens one file at a time
-
-Multiple files can be uploaded together, but only one file is decoded and transcoded at a time.
-
-The Raspberry Pi Zero and Zero 2 W have limited CPU, memory, and storage speed. Sequential processing keeps the clock responsive and reduces the chance of failed uploads, audio interruptions, or a full microSD card.
-
-The processing page shows:
-
-- the active file
-- waiting files
-- completed files
-- failed files
-
-### Upload validation
-
-An MP3 may be rejected when:
-
-- it exceeds 64 MiB
-- it cannot be decoded as an MP3
-- its filename is unsafe or invalid
-- the music storage quota would be exceeded
-- the required free-space reserve would be crossed
-- temporary processing storage is unavailable
-
-The default storage policy preserves at least 64 MiB of free space. This prevents an upload or transcode from consuming the last available space on the microSD card.
-
-### Processing steps
-
-Each accepted MP3 is:
-
-1. validated
-2. tested with `libmpg123`
-3. copied into the processing area
-4. added as a separate job
-5. decoded
-6. re-encoded with `libmp3lame`
-7. moved into the Music library
-
-No shell command or external MP3 encoder is launched.
-
-### Automatic MP3 re-encoding
-
-Every accepted MP3 is automatically decoded and re-encoded by `mk-piclock-api` before it is added to the Music library.
-
-The source file does not need to already match the clock's preferred format. The API normalizes each file using these settings:
-
-| Setting | Automatic output |
-|:--|:--|
-| Channels | Mono |
-| Bitrate | 96 kbps CBR |
-| Sample rate | 44.1 kHz |
-| Low-pass filter | 16 kHz |
-
-This produces a consistent playback format for the Raspberry Pi, reduces storage use, and avoids unusually large or unnecessarily complex source files affecting playback reliability.
-
-Re-encoding is performed internally with `libmpg123` and `libmp3lame`. No shell command or external encoder is launched.
-
-### Clear Queue
-
-**Clear Queue** removes:
-
-- jobs that are still waiting
-- queued source files
-- temporary files belonging to waiting jobs
-
-It does not interrupt the file currently being transcoded.
-
----
-
-## Bedtime mode
-
-Bedtime mode automatically changes how the clock behaves at night.
-
-It has its own:
-
-- start time
-- end time
-- display brightness
-- image library
-- image rotation
-- normal-music permission
-
-During bedtime, the clock uses Bedtime Images and the configured bedtime brightness.
-
-A parent may disable normal music during bedtime while leaving alarms and Story Mode available.
-
-### Why bedtime mode exists
-
-A bright or entertaining clock can encourage a child to keep watching it.
-
-Bedtime mode lets the display remain useful without being unnecessarily bright. It can also prevent random daytime music while still allowing a calm bedtime story.
-
----
-
-## Parent messages
-
-A parent can send a message to the OLED:
+Parents can send a message to the OLED:
 
 - immediately
-- after 10 seconds
-- after 30 seconds
-- after 60 seconds
-- at a selected date and time within the next 30 days
+- after 10, 30, or 60 seconds
+- at a browser-local date and time within the next 30 days
 
-A message may use:
+A message can use:
 
 - text only
-- a selected Day Image
-- a selected Bedtime Image
+- a specific Day Image
+- a specific Bedtime Image
 - a random Day Image
 - a random Bedtime Image
 - an image without text
 
-Examples include:
+One future message can be pending. A new scheduled message replaces the existing one. Pending messages survive a core restart. Each message can optionally play the built-in short chime when it appears. The chime is skipped when other audio is already playing.
 
-- `Time for school`
-- `Please brush your teeth`
-- `Dinner is ready`
-- `Good luck today`
-- `Love you`
+The preview is rendered by `mk-piclock-core` using the same framebuffer, font measurements, word wrapping, image placement, centring, grayscale, and brightness rules as the physical OLED.
 
-Message rendering supports:
+### Images
 
-- automatic word wrapping
-- centred text
-- live font measurements
-- image placement
-- OLED grayscale conversion
-- configured brightness
-- exact framebuffer preview
-
-Only one future message may be pending. Creating a new scheduled message replaces the existing one.
-
-Scheduled messages survive a core service restart.
-
-### Why messages are local
-
-The message feature gives a parent a simple way to communicate without giving the child a phone or adding a cloud messaging service to the bedroom.
-
----
-
-## Day Images and Bedtime Images
-
-The clock keeps two separate artwork libraries.
-
-### Day Images
-
-These can be brighter, more active, or more playful.
-
-### Bedtime Images
-
-These can be calmer and less distracting.
-
-Each library supports:
+Day Images and Bedtime Images each support:
 
 - PNG upload
-- image validation
 - OLED conversion
-- paged review
-- lazy loading
+- paged library review
 - individual deletion
 - delete all
-- download of all original PNG files as a ZIP
+- download all original PNG files as a ZIP
 
-Converted `.raw` files are not included in ZIP downloads.
+The download ZIP excludes converted `.raw` files.
 
-The clock can use:
+### Music
 
-- a selected image
-- a random image
-- automatic image rotation
-- different image sets during day and bedtime
+Uploaded MP3 files are decoded and re-encoded inside `mk-piclock-api`. No shell command or external encoder is launched.
 
----
+The recommended profile is:
 
-## RGB lighting
+- mono
+- 96 kbps CBR
+- 44.1 kHz
+- 16 kHz low-pass
 
-The optional RGB LED acts as both a small night light and a touch-feedback indicator.
+The Music page includes:
 
-### Normal light behaviour
+- multiple-file upload
+- selected-file count and total upload size before upload
+- upload and processing progress for queued and active jobs
+- play, stop, and delete controls
+- global volume
+- optional encoding settings
+- title, artist, album, year, track, genre, duration, bitrate, sample rate, channel, MPEG layer, and file size when available
 
-The Lighting page provides:
+Long `Title - Artist` text scrolls across the OLED. Short text remains centred.
 
-- master on or off control
-- selectable RGB colour
-- global brightness
-- red-channel calibration
-- green-channel calibration
-- blue-channel calibration
-- separate touch-feedback colour
-- saved settings that survive restarts
+Before OLED rendering, the title and artist are filtered against the built-in 5x7 glyph set. Unsupported Unicode, emoji, and symbols are omitted instead of becoming question marks. Filtering affects only the OLED copy. Original ID3 metadata remains available in the browser and API.
 
-When the light is enabled, it displays the selected colour at the selected brightness.
+#### Upload queue rule
 
-When the light is disabled, normal ambient output is turned off.
+A batch of MP3 files may be uploaded at one time. A new upload is refused while any song from the current batch is queued or processing.
 
-### Touch feedback
+The full selection is validated and staged before any job is queued. If staging or queueing fails, the staged files are rolled back instead of leaving a partial batch. This keeps upload validation and transcoding from competing for CPU, memory, and storage on the Raspberry Pi.
 
-Every recognized touch briefly flashes the RGB LED using the configured touch colour.
+**Clear Queue** deletes waiting jobs and their temporary source files. It does not interrupt the file currently transcoding.
 
-This includes:
+### Stories
 
-- a short press
-- the beginning of a three-second hold
-- each tap being counted toward Story Mode
+Story Mode uses a separate MP3 library stored under `assets/stories`. It can be enabled or disabled by a parent from the Stories page and has its own volume control.
 
-The flash confirms that the touch sensor detected the child. It does not depend on whether music or an alarm is currently playing.
+When the touch sensor is tapped ten times within eight seconds:
 
-### Why channel calibration exists
+1. a random story is selected
+2. the OLED clears and shows up to five random Bedtime Images
+3. the configurable intro message appears, defaulting to `STORY MODE!`
+4. after three seconds, the selected story title appears in the normal clock footer
+5. after four more seconds, the standard date returns while the story keeps playing
 
-Red, green, and blue elements often have different apparent brightness.
+A single touch stops the story. Stories are not used by alarms and are not included in backups.
 
-Channel calibration lets the parent reduce a colour that appears too strong or increase one that appears too weak. This produces more balanced mixed colours and a softer night light.
+### RGB activity lighting
 
-### PWM behaviour
+A common-cathode RGB LED can use a separate profile for each activity:
 
-| Property | Behaviour |
-|:--|:--|
-| PWM method | Batched trailing-edge software PWM |
-| PWM frequency | 200 Hz |
-| Stable duty levels | 32 |
-| Expected LED type | Common-cathode RGB |
-| Common-anode support | Not supported |
+- Alarm
+- Bedtime
+- Message
+- Music
+- Daytime
+- Stories
 
-The global brightness setting scales the selected colour without changing its intended RGB balance.
+Each profile supports a solid colour, a fade between two colours, or rainbow mode. Brightness and the full effect-cycle time are configurable. The Lighting page can preview unsaved settings for ten seconds and includes red, green, blue, and white wiring tests.
 
-### Wiring tests
+Touch feedback is handled as a high-priority temporary LED scene while the touch sensor is pressed. Its colour and brightness live under Lighting, Global Controls, so it can stay consistent no matter which activity profile is currently active. The default touch feedback is a white blink.
 
-The Lighting page contains direct tests for:
+Global controls provide a master switch, maximum brightness, per-channel calibration, optional idle-off behaviour, a gradual fade before bedtime, and touch-blink settings. Profile previews and wiring tests may temporarily bypass the master switch. A touch press briefly takes priority while pressed, then the normal alarm, message, story, music, bedtime, or daytime scene resumes.
 
-- red
-- green
-- blue
-- white
+The driver uses 200 Hz batched trailing-edge software PWM with 32 stable duty levels. A modest real-time priority is applied only to the LED timing thread, and missed low-brightness pulses are skipped rather than emitted late. Scene changes crossfade over 350 ms except alarms, which apply immediately. Repeated GPIO write failures disable lighting and appear in status and diagnostics.
 
-These tests temporarily bypass:
-
-- the master light switch
-- the normal brightness limit
-- channel calibration
-
-They are intended for setup and troubleshooting. They help identify:
-
-- swapped colour leads
-- a failed LED channel
-- an incorrect common connection
-- a missing resistor
-- an incorrectly identified LED
-
-### RGB LED wiring
-
-| LED connection | BCM GPIO | Physical pin |
-|:--|--:|--:|
-| Red anode through resistor | 5 | 29 |
-| Green anode through resistor | 6 | 31 |
-| Blue anode through resistor | 13 | 33 |
-| Common cathode | Ground | 30 |
-
-Use one **220 to 330 ohm current-limiting resistor** on each colour channel.
-
-> [!WARNING]
-> This release expects a common-cathode RGB LED. Common-anode RGB LEDs are not supported.
-
-Four-lead RGB LEDs do not use a universal lead order. Check the LED datasheet and use the built-in channel tests before final assembly.
-
-The RGB light is independent from the OLED colour. The OLED colour is fixed by the physical display panel. The GUI panel-colour setting changes browser previews only.
-
----
-
-## Powering the clock
-
-Use a stable **5 V, 2 A USB power adapter**.
-
-### Required cable type
-
-Use:
-
-```text
-USB-A power adapter -> USB-A to USB-C cable -> mk-piclock
-```
-
-Do not rely on:
-
-```text
-USB-C power adapter -> USB-C to USB-C cable -> mk-piclock
-```
-
-> [!IMPORTANT]
-> Power the clock with a USB-A to USB-C cable.
-
-### Why USB-A to USB-C is required
-
-The USB-C connector used by the clock is a convenient physical power connector, but the clock does not implement USB-C current detection or power negotiation on the configuration-channel pins.
-
-A USB-C power supply connected with a USB-C to USB-C cable may wait for a valid USB-C connection before providing power. Because the clock does not present that signalling, some USB-C supplies may provide no power at all.
-
-A USB-A power source does not require USB-C negotiation. It supplies normal 5 V power through the USB-A to USB-C cable, which is what the clock expects.
-
-This is not a fast-charging device. It does not request USB Power Delivery voltages and must only receive normal 5 V power.
-
-### Power summary
-
-| Item | Requirement |
-|:--|:--|
-| Voltage | 5 V DC |
-| Recommended capacity | 2 A |
-| Power adapter connector | USB-A |
-| Clock connector | USB-C |
-| Cable | USB-A to USB-C |
-| USB-C to USB-C | Not recommended and may not power the clock |
-| USB Power Delivery | Not used |
-| Fast charging | Not required |
-
----
+The runtime priority after touch feedback is Alarm, Message, Stories, Music, Bedtime, then Daytime.
 
 ## Web interface
 
-Open the clock from another device on the same network:
+The GUI is organized by task.
 
-```text
-http://<clock-ip>:8080/
-```
+### Everyday
 
-The web interface is grouped around normal parent tasks.
+- Home
+- Alarms
+- Messages
+- Music
+- Lighting
+- Stories
+- Day Images
+- Bedtime Images
 
-| Group | Pages |
-|:--|:--|
-| Everyday | Home, Alarms, Messages, Music, Day Images, Bedtime Images |
-| Listening | Music, Stories |
-| Settings | Display, Lighting, Story Mode, System |
-| Help | Recent Activity, Diagnostics |
+### Settings
 
-The interface includes:
+- Display
+- System
 
-- live OLED preview
-- next alarm
-- Wi-Fi state
-- playback state
-- alarm controls
-- music controls
-- story controls
-- image management
-- font management
-- lighting controls
-- recent activity
-- diagnostics
-- system information
-- maintenance actions
+### Optional password
 
----
+The web interface opens directly when no password exists. When a password is configured, the GUI asks for it before loading clock controls. The password can be set, changed, or removed from System. It is intentionally simple and stored as plain text for use only on a trusted home network.
 
-## Privacy and network safety
+### Always-visible confirmations
 
-The web interface does not use a password.
+Save, test, delete, upload, and other action confirmations appear in a fixed floating notice. Feedback remains readable at any scroll position instead of appearing inside a section that may be off-screen.
 
-Any device that can reach TCP port `8080` can control the clock.
+### System diagnostics
 
-Keep the clock on a trusted home network.
+The System page provides live diagnostics without launching external commands.
 
-Do not:
-
-- forward port `8080` through the router
-- expose the clock directly to the internet
-- connect it to an untrusted guest network
-- connect it to a public network
-
-The clock does not require a cloud account or cloud control service.
-
-The API runs as a restricted system account and communicates with the hardware service through a private Unix socket.
-
----
-
-## Diagnostics and maintenance
-
-### Diagnostics
-
-The Diagnostics page reports:
+#### Network
 
 - IP address
 - hostname
-- connected Wi-Fi network
-- Wi-Fi signal strength
-- network state
-- NTP synchronization
-- CPU temperature
-- free storage
-- used storage
-- core service health
-- API service health
-- last successful alarm
-- current playback state
+- SSID
+- active interface
+- Wi-Fi signal percentage and dBm
 
-These details are intended to answer common parent questions such as:
+#### Time
 
-- Is the clock connected to Wi-Fi?
-- Does the clock have the correct time?
-- Is the microSD card becoming full?
-- Are both services running?
-- Did the last alarm actually trigger?
-- Is audio currently playing?
+- system-time validity
+- NTP synchronization state
+- a prominent Home-page warning when time is not synchronized
 
-### Device identity
+#### Device identity
 
-The System page reports:
+- short Inventory ID derived from the Raspberry Pi board serial
+- full Raspberry Pi board serial
+- Raspberry Pi board revision
+- OS machine ID
+- CPU signature for processor identification
 
-- product version
+Use the Inventory ID or Raspberry Pi serial to track a physical clock. The OS machine ID can change after reimaging, and the CPU signature is not unique.
+
+#### Release and Raspberry Pi platform
+
+- installed release version
 - HTTP API version
-- private IPC version
-- compile time
-- hostname
-- Raspberry Pi serial-derived identity
-- `MK-<serial>` device identifier
-- storage usage
-- Day Image library size
-- Bedtime Image library size
-- Music library size
-- Stories library size
+- API compile date and time
+- Raspberry Pi model
+- operating system name
+- OS version and codename
+- kernel version
+- CPU architecture
+- system uptime
+- CPU temperature
 
-The device identifier makes it easier to tell multiple clocks apart.
+#### Storage and SD card
 
-### Recent Activity
+- used, available, and total system storage
+- Day Images directory size and file count
+- Bedtime Images directory size and file count
+- music directory size and file count
+- stories directory size and file count
+- fonts directory size and file count
+- system drive
+- root partition and filesystem
+- root read/write state
+- boot partition, filesystem, and mount point
+- SD-card device and type
+- product name
+- capacity
+- manufacturer ID
+- OEM ID
+- serial number
+- manufacture date
+- CID
 
-The event log records important actions, including:
+#### Service and clock health
 
-- service startup
-- alarm events
-- playback requests
-- stop requests
-- message activity
-- uploads
-- configuration changes
-- errors
+- API health
+- core connection
+- OLED state
+- touch-sensor state
+- next alarm
+- last successful alarm
 
-### Backup and restore
+**Download Diagnostic Report** saves the same information as a text file for support or troubleshooting.
 
-Maintenance tools support:
+### Backup and reset
 
-- configuration backup
-- Day Image backup
-- Bedtime Image backup
-- font backup
-- restore
-- factory reset
+The System page can:
 
-Music and story audio are excluded from the simplified backup to keep the archive manageable.
+- download a backup ZIP
+- restore a backup created by mk-piclock
+- factory reset settings and user-added assets
 
-> [!CAUTION]
-> Factory reset removes user settings and uploaded assets covered by the reset. Download anything important first.
+Backups include:
 
----
+- alarms
+- display and bedtime settings
+- clock name and personalization
+- scheduled-message data
+- Day Images
+- Bedtime Images
+- uploaded fonts
 
-## Hardware
+Restore accepts only a validated mk-piclock backup ZIP. Paths, metadata, stored entries, sizes, and CRC values are checked before files are activated. Existing settings, images, and fonts are staged first and restored if the operation fails. Uploaded music and stories are not included in backups. Restore has no music or story handling, and both current libraries remain unchanged.
 
-### Supported Raspberry Pi models
+Restore is blocked while an alarm is active. Factory reset is blocked while an alarm is active or music is processing. Factory reset still removes uploaded music and stories. The protected fallback alarm remains installed after a factory reset.
 
-- Raspberry Pi Zero
-- Raspberry Pi Zero 2 W
+### Help
 
-The Raspberry Pi Zero 2 W is recommended because it processes uploads and serves the web interface more quickly.
+- Recent Activity
 
-### Recommended components
+Technical details remain available in collapsed sections so normal controls stay simple.
 
-| Component | Recommended hardware |
-|:--|:--|
-| Raspberry Pi | Raspberry Pi Zero 2 W |
-| Display | SSD1322 256x64 OLED |
-| Amplifier | MAX98357A I2S |
-| Speaker | 4-ohm, 3-watt |
-| Touch sensor | TTP223B |
-| Lighting | Common-cathode RGB LED module |
-| Storage | Reliable microSD card |
-| Power adapter | Stable 5 V, 2 A USB-A adapter |
-| Power cable | USB-A to USB-C |
+## Network access
 
-Review `pinouts.md` before applying power.
+The web interface opens directly when no password is configured. A simple optional password can be set or removed from System. It is stored as plain text on the clock and is intended only to keep casual users out of the controls.
 
-See `BOM.md` for the current parts list, required quantities, purchase costs, and estimated per-clock build price.
+Any device that can reach TCP port 8080 can view and change the clock. Keep the clock on a trusted home network.
 
----
+Do not:
 
-## Software architecture
+- forward port 8080 through the router
+- expose the clock directly to the internet
+- place it on an untrusted guest or public network
 
-mk-piclock Kids uses two native services.
+The API still runs as a restricted system account and communicates with the hardware process through a private Unix socket.
+
+## Architecture
+
+mk-piclock uses two native services.
 
 ### `mk-piclock-core`
 
-This service directly controls the clock hardware and real-time behaviour:
+Owns:
 
-- OLED framebuffer
-- SSD1322 SPI communication
-- GPIO
-- touch input
-- RGB LED
+- OLED and SPI
+- GPIO and touch input
 - ALSA audio playback
 - alarms
-- music playback
-- story playback
-- clock rendering
-- message rendering
+- clock and message rendering
 - bedtime behaviour
 - persistent clock configuration
 - event logging
-- private IPC server
 
 ### `mk-piclock-api`
 
-This service provides the web interface and file-management features:
+Owns:
 
 - local web GUI
 - HTTP API
 - upload validation
 - PNG conversion
-- font upload
-- MP3 metadata extraction
 - MP3 transcoding
-- upload queue
-- Music library
-- Stories library
-- image libraries
-- diagnostics
-- maintenance actions
+- music, story, and image libraries
 - OpenAPI document
-
-### Internal communication
 
 The services communicate through:
 
@@ -759,26 +367,32 @@ The services communicate through:
 /run/mk-piclock/core.sock
 ```
 
-The private binary protocol is **IPC version 11**.
+The private binary protocol is IPC version 16.
 
----
+## Command-free runtime
 
-## Time and NTP
+The running core and API do not use:
 
-mk-piclock Kids reads the Linux system clock. It does not contact an NTP server itself.
+- `exec*()`
+- `system()`
+- `popen()`
+- `posix_spawn()`
+- `fork()` or `vfork()`
 
-Raspberry Pi OS Lite based on Debian 13 Trixie normally uses `systemd-timesyncd`.
+MP3 decoding, MP3 encoding, ZIP backup and restore, network inspection, platform reporting, and storage inspection run in-process through libraries and direct Linux interfaces.
 
-Set the timezone and enable network time:
+The Makefile and installation steps use normal shell tools. This restriction applies to the installed runtime services.
+
+## Time and NTP on Raspberry Pi OS Trixie
+
+mk-piclock reads the Linux system clock. It does not contact an NTP server itself.
+
+Raspberry Pi OS Lite based on Debian 13 Trixie normally uses `systemd-timesyncd` for network time synchronization. Set the timezone and confirm synchronization during installation:
 
 ```bash
 sudo timedatectl set-timezone America/Edmonton
 sudo timedatectl set-ntp true
-```
 
-Check synchronization:
-
-```bash
 timedatectl status
 timedatectl show -p NTPSynchronized
 ```
@@ -791,114 +405,29 @@ NTP service: active
 NTPSynchronized=yes
 ```
 
-The web interface warns when Linux has not confirmed time synchronization.
+Without a battery-backed real-time clock, correct time after a power loss depends on the Pi restoring time and reaching a time source.
 
-### Why time synchronization matters
+## Supported platform
 
-The clock does not have a battery-backed real-time clock.
-
-After a power loss, it depends on Linux restoring the approximate time and then reaching a network time source.
-
-Alarms should not be trusted until the clock reports that time is synchronized.
-
----
-
-## Raspberry Pi boot configuration
-
-Raspberry Pi OS Lite based on Debian 13 Trixie stores its boot configuration in:
+Recommended operating system:
 
 ```text
-/boot/firmware/config.txt
+Raspberry Pi OS Lite
+Debian 13 Trixie
 ```
 
-### 1. Back up the existing file
+Recommended hardware:
 
-```bash
-sudo cp /boot/firmware/config.txt \
-  /boot/firmware/config.txt.mk-piclock-backup
-```
+- Raspberry Pi Zero W or Zero 2 W
+- SSD1322 256x64 OLED
+- MAX98357A I2S amplifier
+- 4-ohm, 3-watt speaker
+- TTP223B touch sensor
+- common-cathode RGB LED with one resistor per colour channel
 
-### 2. Edit the file
-
-```bash
-sudo nano /boot/firmware/config.txt
-```
-
-Add these lines below the existing `[all]` section:
-
-```ini
-# mk-piclock hardware configuration
-
-# Enable SPI0 for the SSD1322 OLED.
-dtparam=spi=on
-
-# Disable the Raspberry Pi built-in audio device.
-dtparam=audio=off
-
-# Enable the MAX98357A I2S amplifier.
-dtoverlay=max98357a
-
-# Minimize memory reserved for legacy GPU functions.
-gpu_mem=16
-```
-
-Do not add another `[all]` heading if the file already contains one.
-
-No changes to `/boot/firmware/cmdline.txt` are required.
-
-### 3. Reboot
-
-```bash
-sudo reboot
-```
-
-### 4. Verify SPI
-
-```bash
-ls -l /dev/spidev0.0
-```
-
-### 5. Verify audio
-
-The program does not require `alsa-utils`. Check the ALSA devices exposed by the kernel:
-
-```bash
-cat /proc/asound/cards
-cat /proc/asound/pcm
-```
-
-The detected audio hardware should include the MAX98357A or a `bcm2835-i2s` device.
-
-For optional command-line audio testing, install:
-
-```bash
-sudo apt install --no-install-recommends -y alsa-utils
-```
-
-This adds tools such as:
-
-```bash
-aplay -l
-speaker-test -D default -c 2 -t sine
-```
-
-Stop `speaker-test` with `Ctrl+C`.
-
-### 6. Review the configured values
-
-```bash
-grep -E \
-  '^(dtparam=spi|dtparam=audio|dtoverlay=max98357a|gpu_mem=)' \
-  /boot/firmware/config.txt
-```
-
-Older Raspberry Pi OS releases used `/boot/config.txt`. Debian 13 Trixie uses `/boot/firmware/config.txt`.
-
----
+See `pinouts.md` before applying power.
 
 ## Build dependencies
-
-Install the required packages:
 
 ```bash
 sudo apt update
@@ -916,118 +445,52 @@ sudo apt install --no-install-recommends -y \
   unzip
 ```
 
-| Package | Why it is needed |
-|:--|:--|
-| `build-essential` | Compiler, linker, and normal build tools |
-| `pkg-config` | Finds installed development libraries |
-| `libgpiod-dev` | Lets the clock control GPIO pins |
-| `gpiod` | Provides GPIO diagnostic commands |
-| `libpng-dev` | Reads and converts PNG artwork |
-| `libfreetype-dev` | Renders TrueType and OpenType fonts |
-| `libasound2-dev` | Provides ALSA audio output |
-| `libmpg123-dev` | Decodes and validates MP3 files |
-| `libmp3lame-dev` | Re-encodes MP3 files inside the API |
-| `libmicrohttpd-dev` | Provides the local web server |
-| `unzip` | Supports archive handling |
+`libmp3lame-dev` provides the in-process MP3 encoder.
 
+## Quick installation
 
-### Optional diagnostic package
-
-`alsa-utils` is not required to compile or run mk-piclock Kids. Audio playback uses the ALSA library through `libasound2`.
-
-Install `alsa-utils` only when command-line tools such as `aplay` or `speaker-test` are wanted for hardware troubleshooting.
-
-
----
-
-## Installation
-
-Apply the boot settings and reboot before building.
-
-### Raspberry Pi Zero
-
-```bash
-make clean
-make -j1
-make install
-sudo systemctl restart \
-  mk-piclock-core.service \
-  mk-piclock-api.service
-```
-
-### Raspberry Pi Zero 2 W
+After configuring SPI and the MAX98357A overlay as described in `INSTALL.md`:
 
 ```bash
 make clean
 make -j2
 make install
-sudo systemctl restart \
-  mk-piclock-core.service \
-  mk-piclock-api.service
+sudo systemctl restart mk-piclock-core.service mk-piclock-api.service
 ```
 
-Do not run:
+Open:
 
-```bash
-sudo make install
+```text
+http://<clock-ip>:8080/
 ```
 
-The Makefile calls `sudo` only for the installation steps that actually require it.
+Do not run `sudo make install`. The Makefile invokes `sudo` only for privileged installation steps.
 
-After installation:
+## Storage
 
-1. restart both services
-2. open the web interface
-3. hard-refresh the browser
-4. confirm that the Product, HTTP API, and Private IPC versions match
+The installer and services only create the storage and runtime directories used by the clock. No old `auth`, `faces`, `bedtime-faces`, or `bedtime_faces` directories are created.
 
----
-
-## Storage locations
-
-| Purpose | Path |
-|:--|:--|
-| Day Images | `/opt/mk-piclock/assets/images` |
-| Bedtime Images | `/opt/mk-piclock/assets/bedtime-images` |
-| Music | `/opt/mk-piclock/assets/music` |
-| Stories | `/opt/mk-piclock/assets/stories` |
-| Music processing | `/opt/mk-piclock/assets/music/.processing` |
-| Story processing | `/opt/mk-piclock/assets/stories/.processing` |
-| Fonts | `/opt/mk-piclock/assets/fonts` |
-| Clock configuration | `/opt/mk-piclock/config/clock.conf` |
-| Event log | `/opt/mk-piclock/config/event.log` |
-
----
+```text
+/opt/mk-piclock/assets/images
+/opt/mk-piclock/assets/bedtime-images
+/opt/mk-piclock/assets/music
+/opt/mk-piclock/assets/music/.processing
+/opt/mk-piclock/assets/stories
+/opt/mk-piclock/assets/fonts
+/opt/mk-piclock/assets/default-alarm.mp3
+/opt/mk-piclock/config/clock.conf
+/opt/mk-piclock/config/event.log
+/run/mk-piclock/core.sock
+```
 
 ## Service logs
 
-### Check both services
-
 ```bash
-systemctl status \
-  mk-piclock-core.service \
-  mk-piclock-api.service
+sudo journalctl -b -u mk-piclock-core.service -n 100 --no-pager
+sudo journalctl -b -u mk-piclock-api.service -n 100 --no-pager
 ```
 
-### View recent core activity
-
-```bash
-sudo journalctl -b \
-  -u mk-piclock-core.service \
-  -n 100 \
-  --no-pager
-```
-
-### View recent API activity
-
-```bash
-sudo journalctl -b \
-  -u mk-piclock-api.service \
-  -n 100 \
-  --no-pager
-```
-
-### Follow both logs live
+Follow both services:
 
 ```bash
 sudo journalctl -f \
@@ -1035,47 +498,33 @@ sudo journalctl -f \
   -u mk-piclock-api.service
 ```
 
----
-
 ## Known limitations
 
-- The MAX98357A amplifier and speaker may make a small pop when audio starts or stops.
-- **Clear Queue** removes waiting files but does not cancel the active transcode.
-- The clock has no battery-backed real-time clock.
-- Correct startup time depends on Linux time restoration and NTP.
-- The web interface has no password. The home network provides the access control.
-- Use a USB-A to USB-C cable. USB-C to USB-C power may not work because the clock does not implement USB-C current detection or negotiation.
-- The physical OLED colour is fixed by the display panel.
-- The GUI panel-colour setting changes browser previews only.
-- Backup archives exclude Music and Stories.
-- MP3 transcoding is slower on a Raspberry Pi Zero than on a Zero 2 W.
-- Multiple MP3 files can be uploaded together, but only one file is transcoded at a time.
-- Common-anode RGB LEDs are not supported.
+- The MAX98357A and speaker may make a small pop when audio starts or stops.
+- **Clear Queue** removes waiting MP3 jobs but does not cancel the active transcode.
+- The clock has no built-in battery-backed real-time clock. Accurate time after startup depends on Linux time restoration or NTP. The GUI warns when the clock is not synchronized.
+- Restore accepts backup ZIP files generated by mk-piclock. Other ZIP compression formats are rejected.
+- The optional GUI password is stored as plain text and is not strong security. Keep the clock on a trusted home network and do not expose port 8080 to the internet.
+- USB-C power behaviour depends on the power board used in the enclosure. A USB-A to USB-C cable is often the safest choice for simple 5 V boards that do not implement USB-C power negotiation correctly.
+- The physical OLED colour is fixed by the panel. The GUI colour choice changes browser previews only.
+- Some network or SD-card fields can show **Unavailable** when the Linux driver does not expose the value.
+- The API service sandbox remains restricted. Network detection uses direct IPv4 ioctls instead of netlink discovery.
 
----
-
-## Version compatibility
+## Versions
 
 ```text
-Product:     1.7.1
-HTTP API:    1.16
-Private IPC: 11
+Product:     1.7.5
+HTTP API:    1.25
+Private IPC: 16
 ```
 
-Install `mk-piclock-core` and `mk-piclock-api` from the same release.
-
-A mismatched GUI or API may refuse to open clock controls until the correct binaries are installed and the browser is hard-refreshed.
-
----
+Install the core and API from the same release, then restart both services. Installation replaces the complete web tree, and every GUI asset uses `Cache-Control: no-store`, preventing retired or cached files from surviving an upgrade.
 
 ## Documentation
 
-| Document | Purpose |
-|:--|:--|
-| `INSTALL.md` | Build and installation |
-| `pinouts.md` | Hardware wiring and GPIO assignments |
-| `CHANGELOG.md` | Version history |
-| `ADDON_API.md` | HTTP API |
-| `api/openapi-v1.json` | OpenAPI schema |
-| `BOM.md` | Parts, quantities, pricing, and estimated build cost |
-| `RELEASE_NOTES.md` | Current release summary |
+- Build and install: `INSTALL.md`
+- Hardware wiring: `pinouts.md`
+- Version history: `CHANGELOG.md`
+- HTTP API: `ADDON_API.md`
+- OpenAPI schema: `api/openapi-v1.json`
+- Current release summary: `RELEASE_NOTES.md`

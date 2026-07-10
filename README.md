@@ -1,13 +1,13 @@
-# mk-piclock v1.7.5
+# mk-piclock v1.7.6
 
 mk-piclock is a native C bedside alarm clock for Raspberry Pi Zero and Zero 2 W. It drives a 256x64 SSD1322 OLED, MAX98357A I2S amplifier, speaker, TTP223B touch sensor, and optional RGB LED.
 
 The project was created for my daughter Rylie. It is designed to behave like a simple bedside appliance, not a general-purpose computer.
 
-## What's new in v1.7.5
+## What's new in v1.7.6
 
-- Increased the OLED diagnostic hold from six to eight seconds, leaving a safer gap after the three-second music gesture.
-- Expanded this README so the optional password, message chime, OLED diagnostics, floating browser confirmations, and OLED metadata filtering are easy to find.
+- Removed unsupported parentheses from the OLED Wi-Fi signal line so it no longer ends with a fallback question mark.
+- Simplified the touch instructions: keep holding the sensor to open network diagnostics.
 - Retained clean OLED song metadata filtering. Unsupported characters are omitted while the original title and artist remain unchanged in the GUI and API.
 - Kept HTTP API 1.25 and private IPC 16.
 
@@ -60,19 +60,19 @@ It is retained during factory reset and is not part of the user music library.
 
 - Press while an alarm is active: dismiss the alarm
 - Short press while music or a story is playing: stop the audio
-- Hold for three seconds, then release before eight seconds: play a random song
-- Hold for eight seconds: open the OLED network diagnostic screen
+- Hold, then release: play a random song
+- Keep holding the sensor: open the OLED network diagnostic screen
 - Tap while diagnostics are open: close diagnostics
 - Ten short taps within eight seconds: play a random story when Story Mode is enabled
 - Any touch press: blink the RGB LED using the selected touch-feedback colour
 
-The music action runs only when the sensor is released. Continuing to hold past eight seconds opens diagnostics instead, so the same press cannot start music. A diagnostic hold is not counted toward Story Mode.
+The music action runs only when the sensor is released. Keep holding to open diagnostics instead, so the same press cannot start music. A diagnostic hold is not counted toward Story Mode.
 
 Alarms cannot be dismissed from the browser. The physical touch sensor must be pressed.
 
 #### OLED network diagnostics
 
-The diagnostic screen shows:
+Simply hold down the touch sensor to open the diagnostic screen. It shows:
 
 - Wi-Fi network name
 - Wi-Fi signal strength
@@ -513,7 +513,7 @@ sudo journalctl -f \
 ## Versions
 
 ```text
-Product:     1.7.5
+Product:     1.7.6
 HTTP API:    1.25
 Private IPC: 16
 ```

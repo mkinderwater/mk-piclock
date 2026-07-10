@@ -268,16 +268,22 @@ Each accepted MP3 is:
 
 No shell command or external MP3 encoder is launched.
 
-### Recommended MP3 profile
+### Automatic MP3 re-encoding
 
-| Setting | Value |
+Every accepted MP3 is automatically decoded and re-encoded by `mk-piclock-api` before it is added to the Music library.
+
+The source file does not need to already match the clock's preferred format. The API normalizes each file using these settings:
+
+| Setting | Automatic output |
 |:--|:--|
 | Channels | Mono |
 | Bitrate | 96 kbps CBR |
 | Sample rate | 44.1 kHz |
 | Low-pass filter | 16 kHz |
 
-This profile provides clear speech and music while keeping storage and decoding requirements reasonable.
+This produces a consistent playback format for the Raspberry Pi, reduces storage use, and avoids unusually large or unnecessarily complex source files affecting playback reliability.
+
+Re-encoding is performed internally with `libmpg123` and `libmp3lame`. No shell command or external encoder is launched.
 
 ### Clear Queue
 
@@ -854,11 +860,29 @@ ls -l /dev/spidev0.0
 
 ### 5. Verify audio
 
+The program does not require `alsa-utils`. Check the ALSA devices exposed by the kernel:
+
 ```bash
-aplay -l
+cat /proc/asound/cards
+cat /proc/asound/pcm
 ```
 
-The detected audio device should include `MAX98357A` or `bcm2835-i2s`.
+The detected audio hardware should include the MAX98357A or a `bcm2835-i2s` device.
+
+For optional command-line audio testing, install:
+
+```bash
+sudo apt install --no-install-recommends -y alsa-utils
+```
+
+This adds tools such as:
+
+```bash
+aplay -l
+speaker-test -D default -c 2 -t sine
+```
+
+Stop `speaker-test` with `Ctrl+C`.
 
 ### 6. Review the configured values
 
@@ -889,7 +913,6 @@ sudo apt install --no-install-recommends -y \
   libmpg123-dev \
   libmp3lame-dev \
   libmicrohttpd-dev \
-  alsa-utils \
   unzip
 ```
 
@@ -905,8 +928,15 @@ sudo apt install --no-install-recommends -y \
 | `libmpg123-dev` | Decodes and validates MP3 files |
 | `libmp3lame-dev` | Re-encodes MP3 files inside the API |
 | `libmicrohttpd-dev` | Provides the local web server |
-| `alsa-utils` | Provides audio testing tools |
 | `unzip` | Supports archive handling |
+
+
+### Optional diagnostic package
+
+`alsa-utils` is not required to compile or run mk-piclock Kids. Audio playback uses the ALSA library through `libasound2`.
+
+Install `alsa-utils` only when command-line tools such as `aplay` or `speaker-test` are wanted for hardware troubleshooting.
+
 
 ---
 

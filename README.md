@@ -245,7 +245,7 @@ Debian 13 Trixie
 
 | Component | Recommended device |
 |:--|:--|
-| Raspberry Pi | Raspberry Pi Zero 2 W or Raspberry Pi 5 |
+| Raspberry Pi | Raspberry Pi Zero or Raspberry Pi Zero 2 W |
 | Display | SSD1322 256x64 OLED |
 | Amplifier | MAX98357A I2S |
 | Speaker | 4-ohm, 3-watt |
@@ -394,22 +394,11 @@ sudo apt install --no-install-recommends -y \
 
 Apply the boot settings, reboot, then build and install mk-piclock.
 
-### Raspberry Pi Zero 2 W
+### Raspberry Pi Zero and Zero 2 W
 
 ```bash
 make clean
 make -j2
-make install
-sudo systemctl restart \
-  mk-piclock-core.service \
-  mk-piclock-api.service
-```
-
-### Raspberry Pi 5
-
-```bash
-make clean
-make -j4
 make install
 sudo systemctl restart \
   mk-piclock-core.service \

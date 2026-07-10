@@ -207,6 +207,9 @@ Long `Title - Artist` text scrolls across the OLED. Short text remains centred.
 
 ### Uploading MP3 files
 
+> [!IMPORTANT]
+> Multiple MP3 files can be selected and uploaded together. The upload queue may contain several files. The Raspberry Pi processes and transcodes them sequentially, one file at a time.
+
 Several MP3 files may be selected and uploaded in one batch.
 
 Each file is checked separately.
@@ -695,6 +698,8 @@ The Raspberry Pi Zero 2 W is recommended because it processes uploads and serves
 
 Review `pinouts.md` before applying power.
 
+See `BOM.md` for the current parts list, required quantities, purchase costs, and estimated per-clock build price.
+
 ---
 
 ## Software architecture
@@ -1042,4 +1047,5 @@ A mismatched GUI or API may refuse to open clock controls until the correct bina
 | `CHANGELOG.md` | Version history |
 | `ADDON_API.md` | HTTP API |
 | `api/openapi-v1.json` | OpenAPI schema |
+| `BOM.md` | Parts, quantities, pricing, and estimated build cost |
 | `RELEASE_NOTES.md` | Current release summary |

@@ -46,7 +46,7 @@
 
 #define API_NAME "mk-piclock-api"
 #define API_VERSION "1.25"
-#define PRODUCT_VERSION "1.7.6"
+#define PRODUCT_VERSION "1.8.0"
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define DEFAULT_PUBLIC_BIND "0.0.0.0"
 #define DEFAULT_PUBLIC_PORT 8080

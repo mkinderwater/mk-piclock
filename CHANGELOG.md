@@ -1,3 +1,15 @@
+## v1.8.0 - 2026-07-17
+
+### Production cleanup and warning prevention
+
+- Removed the redundant `trim_ascii_line()` and `read_first_line_from_file()` helpers.
+- Read the `wlan0` kernel state directly inside the Wi-Fi status check while preserving the `/proc/net/wireless` fallback.
+- Added `-Werror=unused-function` and `-Werror=implicit-function-declaration` to both native builds.
+- Made the warning policy independent of user-supplied optimization flags.
+- Removed the unnecessary `gpiod` command-line package from the documented dependency list.
+- Audited all C translation units for unreferenced static and exported functions; no other dead functions were found.
+- Kept HTTP API at 1.25 and private IPC at 16.
+
 ## v1.7.6 - 2026-07-10
 
 ### Clean OLED network diagnostics
@@ -482,6 +494,7 @@ The following work was completed throughout earlier v1.6 releases. Some intermed
 
 | Product | HTTP API | Private IPC | Notes |
 | --- | ---: | ---: | --- |
+| 1.8.0 | 1.25 | 16 | Production cleanup and warning prevention |
 | 1.7.6 | 1.25 | 16 | Clean OLED network diagnostics |
 | 1.7.5 | 1.25 | 16 | Eight-second diagnostics hold and complete README |
 | 1.7.4 | 1.25 | 16 | OLED metadata glyph filtering |

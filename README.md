@@ -1,14 +1,15 @@
-# mk-piclock v1.7.6
+# mk-piclock v1.8.0
 
 mk-piclock is a native C bedside alarm clock for Raspberry Pi Zero and Zero 2 W. It drives a 256x64 SSD1322 OLED, MAX98357A I2S amplifier, speaker, TTP223B touch sensor, and optional RGB LED.
 
 The project was created for my daughter Rylie. It is designed to behave like a simple bedside appliance, not a general-purpose computer.
 
-## What's new in v1.7.6
+## What's new in v1.8.0
 
-- Removed unsupported parentheses from the OLED Wi-Fi signal line so it no longer ends with a fallback question mark.
-- Simplified the touch instructions: keep holding the sensor to open network diagnostics.
-- Retained clean OLED song metadata filtering. Unsupported characters are omitted while the original title and artist remain unchanged in the GUI and API.
+- Removed the redundant file-line helper that could trigger an unused-function warning in stale or partial source trees.
+- Simplified the Wi-Fi kernel-state read without changing the status-pill behaviour.
+- Made unused static functions and implicit function declarations build errors.
+- Removed the unnecessary `gpiod` command-line package from the dependency list.
 - Kept HTTP API 1.25 and private IPC 16.
 
 
@@ -435,7 +436,6 @@ sudo apt install --no-install-recommends -y \
   build-essential \
   pkg-config \
   libgpiod-dev \
-  gpiod \
   libpng-dev \
   libfreetype-dev \
   libasound2-dev \
@@ -513,7 +513,7 @@ sudo journalctl -f \
 ## Versions
 
 ```text
-Product:     1.7.6
+Product:     1.8.0
 HTTP API:    1.25
 Private IPC: 16
 ```

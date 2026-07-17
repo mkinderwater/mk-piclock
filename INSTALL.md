@@ -1,10 +1,10 @@
-# mk-piclock v1.7.6: Build and Install
+# mk-piclock v1.8.0: Build and Install
 
 > A practical installation guide for the Raspberry Pi Zero W and Zero 2 W builds of mk-piclock Kids.
 
 | Product | HTTP API | Private IPC |
 |:--|:--|:--|
-| `1.7.6` | `1.25` | `16` |
+| `1.8.0` | `1.25` | `16` |
 
 mk-piclock uses two native C services:
 
@@ -152,7 +152,6 @@ sudo apt install --no-install-recommends -y \
   build-essential \
   pkg-config \
   libgpiod-dev \
-  gpiod \
   libpng-dev \
   libfreetype-dev \
   libasound2-dev \
@@ -262,20 +261,20 @@ See `pinouts.md` for the complete power, OLED, amplifier, speaker, touch, and RG
 
 Place the release ZIP and `.sha256` file in the same directory.
 
-For this updated v1.7.6 package:
+For this v1.8.0 package:
 
 ```bash
 cd ~
-sha256sum -c mk-piclock-v1.7.6-install-update.zip.sha256
-rm -rf mk-piclock-v1.7.6-install-update
-unzip mk-piclock-v1.7.6-install-update.zip
-cd mk-piclock-v1.7.6-install-update
+sha256sum -c mk-piclock-v1.8.0-production-cleanup.zip.sha256
+rm -rf mk-piclock-v1.8.0-production-cleanup
+unzip mk-piclock-v1.8.0-production-cleanup.zip
+cd mk-piclock-v1.8.0-production-cleanup
 ```
 
 A successful checksum test reports:
 
 ```text
-mk-piclock-v1.7.6-install-update.zip: OK
+mk-piclock-v1.8.0-production-cleanup.zip: OK
 ```
 
 When installing a differently named package, replace the filenames and directory name in the commands above.
@@ -498,7 +497,7 @@ It does not intentionally remove:
 ### Recommended upgrade steps
 
 ```bash
-cd ~/mk-piclock-v1.7.6-install-update
+cd ~/mk-piclock-v1.8.0-production-cleanup
 make clean
 make -j2
 make install
@@ -512,7 +511,7 @@ Use `make -j1` on a Pi Zero W.
 Confirm the installed versions under **System**:
 
 ```text
-Product:     1.7.6
+Product:     1.8.0
 HTTP API:    1.25
 Private IPC: 16
 ```

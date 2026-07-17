@@ -56,7 +56,7 @@
 #define write_all mp_write_full
 
 #define APP_NAME "mk-piclock-core"
-#define APP_VERSION "1.7.6"
+#define APP_VERSION "1.8.0"
 
 #define LED_PROFILE(fx, level, seconds, r1, g1, b1, r2, g2, b2) \
     { .effect = (fx), .brightness = (level), .cycle_seconds = (seconds), .reserved = 0, \
@@ -2055,44 +2055,23 @@ static void draw_version_corner(void) {
 }
 
 
-static void trim_ascii_line(char *s) {
-    if (!s) return;
-    size_t len = strlen(s);
-    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' ' || s[len - 1] == '\t')) {
-        s[--len] = '\0';
-    }
-    char *start = s;
-    while (*start == ' ' || *start == '\t') start++;
-    if (start != s) memmove(s, start, strlen(start) + 1);
-}
-
-static int read_first_line_from_file(const char *path, char *out, size_t out_len) {
-    if (!path || !out || out_len == 0) return -1;
-    out[0] = '\0';
-
-    FILE *fp = fopen(path, "r");
-    if (!fp) return -1;
-
-    if (!fgets(out, (int)out_len, fp)) {
-        fclose(fp);
-        out[0] = '\0';
-        return -1;
-    }
-
-    fclose(fp);
-    trim_ascii_line(out);
-    return out[0] ? 0 : -1;
-}
-
 static int wifi_connected_kernel(void) {
     char line[256];
 
-    if (read_first_line_from_file("/sys/class/net/wlan0/operstate", line, sizeof(line)) == 0) {
-        if (strcmp(line, "up") == 0) return 1;
-        if (strcmp(line, "down") == 0 || strcmp(line, "dormant") == 0 || strcmp(line, "notpresent") == 0) return 0;
+    FILE *fp = fopen("/sys/class/net/wlan0/operstate", "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            fclose(fp);
+            if (strcmp(line, "up") == 0) return 1;
+            if (strcmp(line, "down") == 0 || strcmp(line, "dormant") == 0 ||
+                strcmp(line, "notpresent") == 0) return 0;
+        } else {
+            fclose(fp);
+        }
     }
 
-    FILE *fp = fopen("/proc/net/wireless", "r");
+    fp = fopen("/proc/net/wireless", "r");
     if (!fp) return 0;
 
     int connected = 0;

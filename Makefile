@@ -1,17 +1,19 @@
 CC ?= gcc
 PKG_CONFIG ?= pkg-config
 CPPFLAGS ?=
-CFLAGS ?= -Wall -Wextra -O2
+CFLAGS ?= -O2
+WARNINGS = -Wall -Wextra -Werror=unused-function -Werror=implicit-function-declaration
+C_STANDARD = -std=gnu11
 LDFLAGS ?=
 
 CORE_CPPFLAGS = $(CPPFLAGS) -I/usr/include/freetype2
-CORE_CFLAGS = $(CFLAGS)
+CORE_CFLAGS = $(C_STANDARD) $(WARNINGS) $(CFLAGS)
 CORE_LIBS ?= -lgpiod -lfreetype -lasound -lmpg123 -pthread
 
 MHD_CFLAGS := $(shell $(PKG_CONFIG) --cflags libmicrohttpd 2>/dev/null)
 MHD_LIBS := $(shell $(PKG_CONFIG) --libs libmicrohttpd 2>/dev/null)
 API_CPPFLAGS = $(CPPFLAGS) $(MHD_CFLAGS) -I/usr/include/freetype2 -I/usr/include/libpng16
-API_CFLAGS = $(CFLAGS)
+API_CFLAGS = $(C_STANDARD) $(WARNINGS) $(CFLAGS)
 API_LIBS ?= $(if $(strip $(MHD_LIBS)),$(MHD_LIBS),-lmicrohttpd) -lpng -lfreetype -lmpg123 -lmp3lame -pthread
 
 .PHONY: all clean install uninstall

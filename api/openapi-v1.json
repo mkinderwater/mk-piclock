@@ -3,7 +3,7 @@
   "info": {
     "title": "mk-piclock API",
     "version": "1.25",
-    "description": "Local HTTP API for mk-piclock 1.7.6. A simple optional plaintext password can protect API routes on the trusted home network."
+    "description": "Local HTTP API for mk-piclock 1.8.0. A simple optional plaintext password can protect API routes on the trusted home network."
   },
   "servers": [
     {

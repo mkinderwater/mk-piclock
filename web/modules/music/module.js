@@ -1,4 +1,4 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=1.7.6';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=1.8.0';
 
 export async function mount(ctx) {
     const renderStatus = status => {

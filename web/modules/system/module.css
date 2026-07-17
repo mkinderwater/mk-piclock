@@ -2,6 +2,7 @@
 .system-module .warning-card h2 { color: #7a4b05; }
 .system-module .report-button { margin-top: 10px; }
 .system-module form { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.system-module #password-form { margin-top: 0; padding-top: 0; border-top: 0; }
 .system-module .danger-zone { border-color: #d7a0a0; }
 .system-module .danger-zone h2 { color: var(--danger); }
 .system-module .technical-value { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.86em; }

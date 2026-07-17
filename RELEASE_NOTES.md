@@ -1,18 +1,31 @@
-# mk-piclock v1.8.0 Release Notes
+# mk-piclock v1.8.1 Release Notes
 
-## Production cleanup and warning prevention
+## GUI consistency polish
 
+- Added a consistent divider beneath every GUI card heading.
+- Changed inactive sound labels from `Quiet` to `None`.
+- Standardized spacing between RGB Lighting and Global Controls.
+- Removed the duplicate divider beneath the Web password description.
+- Added matching headings to Story playback and Activity history.
+- Refreshed browser asset identifiers to prevent stale cached CSS or modules.
+
+## Production display and code cleanup
+
+- Removed the obsolete OLED pill renderer, rounded-pill geometry, Wi-Fi icon, music-note icon, and alarm-volume pill plumbing.
+- Restored the approved footer format: `W.xxx | ALARM ON`, with `W.OFF` blinking when `wlan0` is not connected.
+- Right-aligned the time and date to a fixed two-pixel display margin.
+- Restored the permanent one-pixel footer separator with a moving black seconds position.
+- Changed footer network detection to require Wi-Fi carrier and an assigned IPv4 address, refreshed once per second.
 - Removed the redundant `trim_ascii_line()` and `read_first_line_from_file()` helpers.
-- Simplified the Wi-Fi status check to read `wlan0` state directly, then fall back to `/proc/net/wireless` as before.
 - Added build enforcement for unused static functions and implicit function declarations.
-- Removed the unneeded `gpiod` command-line package from the build dependency list. The required libgpiod library remains installed through `libgpiod-dev`.
-- Audited all C translation units for unreferenced static and exported functions. No other dead functions were found.
-- Kept runtime behaviour, HTTP API 1.25, and private IPC 16 unchanged.
+- Removed the unneeded `gpiod` command-line package. `libgpiod-dev` remains required.
+- Audited all C translation units and browser modules. No other unreferenced functions were found.
+- Kept HTTP API 1.25 and private IPC 16.
 
 ## Versions
 
 ```text
-Product:     1.8.0
+Product:     1.8.1
 HTTP API:    1.25
 Private IPC: 16
 ```

@@ -1,9 +1,9 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=1.8.0';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=1.8.1';
 
 export async function mount(ctx) {
     const renderStatus = status => {
         if (!status) return;
-        ctx.setText('#music-status', status.audio_playing ? 'Playing' : 'Quiet');
+        ctx.setText('#music-status', status.audio_playing ? 'Playing' : 'None');
         const metadata = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ');
         ctx.setText('#music-current', metadata || status.audio_file || '-');
         ctx.setValue('#global-volume', status.global_volume ?? 80);

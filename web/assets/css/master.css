@@ -139,11 +139,16 @@ p { line-height: 1.45; }
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    margin-bottom: 8px;
-    padding-bottom: 7px;
+    margin-bottom: 12px;
+    padding-bottom: 9px;
     border-bottom: 1px solid var(--line);
 }
 .card-title-row h2 { margin: 0; }
+.card > h2:first-child {
+    margin: 0 0 12px;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--line);
+}
 .font-name { overflow-wrap: anywhere; font-weight: 800; }
 
 .pill, .badge {

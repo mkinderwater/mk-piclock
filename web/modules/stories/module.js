@@ -1,4 +1,4 @@
-import {audioTrackFacts} from '/assets/js/audio-library.js?v=1.8.0';
+import {audioTrackFacts} from '/assets/js/audio-library.js?v=1.8.1';
 
 export async function mount(ctx) {
     const renderStatus = status => {
@@ -10,7 +10,7 @@ export async function mount(ctx) {
             ? `Intro: ${introText}`
             : (status.story_playing
                 ? ([status.audio_title, status.audio_artist].filter(Boolean).join(' - ') || status.audio_file || 'Playing')
-                : 'Quiet');
+                : 'None');
         ctx.setText('#story-current', current);
         const toggle = ctx.$('#story-enabled');
         if (toggle) toggle.checked = enabled;

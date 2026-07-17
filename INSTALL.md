@@ -1,10 +1,10 @@
-# mk-piclock v1.8.0: Build and Install
+# mk-piclock v1.8.1: Build and Install
 
 > A practical installation guide for the Raspberry Pi Zero W and Zero 2 W builds of mk-piclock Kids.
 
 | Product | HTTP API | Private IPC |
 |:--|:--|:--|
-| `1.8.0` | `1.25` | `16` |
+| `1.8.1` | `1.25` | `16` |
 
 mk-piclock uses two native C services:
 
@@ -227,7 +227,6 @@ After rebooting, verify SPI and GPIO:
 
 ```bash
 ls -l /dev/spidev0.0 /dev/gpiochip0
-gpiodetect
 ```
 
 Verify that Linux created an ALSA sound card and playback device:
@@ -261,20 +260,20 @@ See `pinouts.md` for the complete power, OLED, amplifier, speaker, touch, and RG
 
 Place the release ZIP and `.sha256` file in the same directory.
 
-For this v1.8.0 package:
+For this v1.8.1 package:
 
 ```bash
 cd ~
-sha256sum -c mk-piclock-v1.8.0-production-cleanup.zip.sha256
-rm -rf mk-piclock-v1.8.0-production-cleanup
-unzip mk-piclock-v1.8.0-production-cleanup.zip
-cd mk-piclock-v1.8.0-production-cleanup
+sha256sum -c mk-piclock-v1.8.1-production-final.zip.sha256
+rm -rf mk-piclock-v1.8.1-production-final
+unzip mk-piclock-v1.8.1-production-final.zip
+cd mk-piclock-v1.8.1-production-final
 ```
 
 A successful checksum test reports:
 
 ```text
-mk-piclock-v1.8.0-production-cleanup.zip: OK
+mk-piclock-v1.8.1-production-final.zip: OK
 ```
 
 When installing a differently named package, replace the filenames and directory name in the commands above.
@@ -497,7 +496,7 @@ It does not intentionally remove:
 ### Recommended upgrade steps
 
 ```bash
-cd ~/mk-piclock-v1.8.0-production-cleanup
+cd ~/mk-piclock-v1.8.1-production-final
 make clean
 make -j2
 make install
@@ -511,7 +510,7 @@ Use `make -j1` on a Pi Zero W.
 Confirm the installed versions under **System**:
 
 ```text
-Product:     1.8.0
+Product:     1.8.1
 HTTP API:    1.25
 Private IPC: 16
 ```

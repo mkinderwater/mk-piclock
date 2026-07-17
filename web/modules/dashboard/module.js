@@ -73,7 +73,7 @@ export async function mount(ctx) {
         ctx.setText('#summary-clock', status.oled_ok ? `Working · ${status.time || ''}` : 'Screen unavailable');
         ctx.setText('#summary-sound', status.alarm_active
             ? `Alarm playing · ${status.alarm_volume_percent || 0}%`
-            : (storyIntro ? `Story Mode · ${storyText}` : (status.audio_playing ? `Playing ${track || 'music'}` : 'Quiet')));
+            : (storyIntro ? `Story Mode · ${storyText}` : (status.audio_playing ? `Playing ${track || 'music'}` : 'None')));
         ctx.setText('#summary-bedtime', status.bedtime_enabled
             ? `${ctx.timeValue(status.bedtime_start_hour, status.bedtime_start_min)} to ${ctx.timeValue(status.bedtime_end_hour, status.bedtime_end_min)}`
             : 'Not scheduled');

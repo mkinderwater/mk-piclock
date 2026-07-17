@@ -19,8 +19,8 @@ let authPromise = null;
 let authResolve = null;
 let noticeTimer = null;
 const statusListeners = new Set();
-const GUI_VERSION = '1.8.0';
-const GUI_ASSET_VERSION = GUI_VERSION;
+const GUI_VERSION = '1.8.1';
+const GUI_ASSET_VERSION = '1.8.1';
 const REQUIRED_API_VERSION = '1.25';
 const oledPreviewIntensity = Array.from({length: 16}, (_, level) =>
     level === 0 ? 0 : Math.pow(level / 15, 0.48));

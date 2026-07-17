@@ -1,17 +1,19 @@
-# mk-piclock v1.8.0
+# mk-piclock v1.8.1
 
 mk-piclock is a native C bedside alarm clock for Raspberry Pi Zero and Zero 2 W. It drives a 256x64 SSD1322 OLED, MAX98357A I2S amplifier, speaker, TTP223B touch sensor, and optional RGB LED.
 
 The project was created for my daughter Rylie. It is designed to behave like a simple bedside appliance, not a general-purpose computer.
 
-## What's new in v1.8.0
+## What's new in v1.8.1
 
-- Removed the redundant file-line helper that could trigger an unused-function warning in stale or partial source trees.
-- Simplified the Wi-Fi kernel-state read without changing the status-pill behaviour.
-- Made unused static functions and implicit function declarations build errors.
-- Removed the unnecessary `gpiod` command-line package from the dependency list.
+- Standardized every GUI card heading with the same divider, spacing, and title alignment.
+- Changed inactive sound status from `Quiet` to `None` across the GUI.
+- Added consistent spacing between RGB Lighting and Global Controls.
+- Removed the duplicate divider beneath the Web password description.
+- Added matching headings to Story playback and Activity history.
+- Updated browser asset versions so the polished GUI loads without stale cached files.
+- Retained the production display and code cleanup introduced in v1.8.0.
 - Kept HTTP API 1.25 and private IPC 16.
-
 
 ## Features
 
@@ -22,13 +24,21 @@ The project was created for my daughter Rylie. It is designed to behave like a s
 - Blinking colon
 - Day and bedtime image libraries
 - Automatic image rotation
-- Wi-Fi and alarm status indicators
-- Alarm volume indicator while an alarm is playing
+- Plain-text Wi-Fi and alarm status footer
+- Blinking `W.OFF` warning when wireless is disconnected
 - OLED brightness control
 - Separate bedtime schedule and brightness
 - Yellow, green, or white panel selection for browser previews
 - Built-in and uploaded TrueType or OpenType fonts
 - Exact 256x64 live framebuffer preview on the Home page
+
+The normal footer uses one baseline:
+
+```text
+W.095 | ALARM ON                  FRIDAY, JULY 17 2026
+```
+
+The last IPv4 octet is zero-padded. The alarm label changes between `ALARM ON` and `ALARM OFF`. When `wlan0` loses carrier or its IPv4 address, `W.OFF` blinks. The clock and alarms continue locally, but the browser and network time synchronization remain unavailable until Wi-Fi returns.
 
 ### Alarms
 
@@ -513,7 +523,7 @@ sudo journalctl -f \
 ## Versions
 
 ```text
-Product:     1.8.0
+Product:     1.8.1
 HTTP API:    1.25
 Private IPC: 16
 ```

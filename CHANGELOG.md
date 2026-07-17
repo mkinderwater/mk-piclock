@@ -1,13 +1,28 @@
+## v1.8.1 - 2026-07-17
+
+### GUI consistency polish
+
+- Standardized every GUI card heading with the same divider, spacing, and title alignment.
+- Changed inactive sound status from `Quiet` to `None` across the GUI.
+- Added consistent spacing between RGB Lighting and Global Controls.
+- Removed the duplicate divider beneath the Web password description.
+- Added matching headings to Story playback and Activity history.
+- Updated browser asset identifiers to prevent stale cached files.
+- Kept HTTP API at 1.25 and private IPC at 16.
+
 ## v1.8.0 - 2026-07-17
 
-### Production cleanup and warning prevention
+### Production display and code cleanup
 
+- Removed the obsolete OLED Wi-Fi and alarm pill renderer, geometry helpers, and icon routines.
+- Replaced the old footer with `W.xxx | ALARM ON`; disconnected Wi-Fi now shows a blinking `W.OFF`.
+- Right-aligned the time and date to the same fixed display edge.
+- Restored the permanent one-pixel separator with a moving black seconds position.
+- Changed footer Wi-Fi detection to require carrier and IPv4, with a one-second cache instead of 60 seconds.
 - Removed the redundant `trim_ascii_line()` and `read_first_line_from_file()` helpers.
-- Read the `wlan0` kernel state directly inside the Wi-Fi status check while preserving the `/proc/net/wireless` fallback.
 - Added `-Werror=unused-function` and `-Werror=implicit-function-declaration` to both native builds.
-- Made the warning policy independent of user-supplied optimization flags.
 - Removed the unnecessary `gpiod` command-line package from the documented dependency list.
-- Audited all C translation units for unreferenced static and exported functions; no other dead functions were found.
+- Audited all C translation units and browser modules; no other unreferenced functions were found.
 - Kept HTTP API at 1.25 and private IPC at 16.
 
 ## v1.7.6 - 2026-07-10
@@ -494,6 +509,7 @@ The following work was completed throughout earlier v1.6 releases. Some intermed
 
 | Product | HTTP API | Private IPC | Notes |
 | --- | ---: | ---: | --- |
+| 1.8.1 | 1.25 | 16 | GUI consistency polish |
 | 1.8.0 | 1.25 | 16 | Production cleanup and warning prevention |
 | 1.7.6 | 1.25 | 16 | Clean OLED network diagnostics |
 | 1.7.5 | 1.25 | 16 | Eight-second diagnostics hold and complete README |
@@ -526,3 +542,9 @@ The following work was completed throughout earlier v1.6 releases. Some intermed
 | 1.6.34 | 1.14 | 11 | Last password-protected release |
 
 Core, API, web assets, and OpenAPI schema should be installed from the same release.
+
+### GUI consistency update
+
+- Standardized card heading dividers across all modules.
+- Replaced inactive `Quiet` labels with `None`.
+- Corrected Lighting page spacing and the Web password double divider.

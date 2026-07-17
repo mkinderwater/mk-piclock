@@ -56,7 +56,7 @@
 #define write_all mp_write_full
 
 #define APP_NAME "mk-piclock-core"
-#define APP_VERSION "1.8.0"
+#define APP_VERSION "1.8.1"
 
 #define LED_PROFILE(fx, level, seconds, r1, g1, b1, r2, g2, b2) \
     { .effect = (fx), .brightness = (level), .cycle_seconds = (seconds), .reserved = 0, \
@@ -131,9 +131,13 @@
 #define CLOCK_IMAGE_Y_NUDGE -2
 #define CLOCK_SIDE_WIDGET_SIZE 54
 #define CLOCK_SIDE_WIDGET_X 4
-#define CLOCK_STATUS_PILL_H 11
-#define SONG_METADATA_X 74
-#define SONG_METADATA_W (OLED_W - SONG_METADATA_X - 2)
+#define CLOCK_FOOTER_H 11
+#define CLOCK_FOOTER_TEXT_Y (OLED_H - 8)
+#define CLOCK_RIGHT_X (OLED_W - 2)
+#define CLOCK_SECONDS_LINE_Y (OLED_H - CLOCK_FOOTER_H - 1)
+#define CLOCK_SECONDS_LINE_LEVEL 12
+#define CLOCK_STATUS_TEXT_X 2
+#define CLOCK_STATUS_TEXT_GAP 6
 #define SONG_METADATA_TEXT_MAX (MP_ID3_TEXT_MAX * 2 + 4)
 #define SONG_SCROLL_SPEED_PX_PER_SEC 18u
 #define SONG_SCROLL_GAP_PX 24
@@ -1418,6 +1422,14 @@ static uint8_t oled_get_px(int x, int y) {
     return fb[idx] & 0x0F;
 }
 
+static void draw_seconds_position_line(int second) {
+    int sec = clamp_int(second, 0, 59);
+    int gap_x = (sec * (OLED_W - 1)) / 59;
+    for (int x = 0; x < OLED_W; x++)
+        oled_set_px(x, CLOCK_SECONDS_LINE_Y,
+                    x == gap_x ? 0 : CLOCK_SECONDS_LINE_LEVEL);
+}
+
 /*
  * FreeType gives us linear 0..255 coverage, but the SSD1322 OLED and human
  * perception make mid-gray anti-aliased pixels look too bright/fat.
@@ -1456,43 +1468,7 @@ static void oled_fill_rect(int x, int y, int w, int h, uint8_t gray4) {
     }
 }
 
-static int pill_row_inset(int row, int h) {
-    if (h < 7) return 0;
-    int mid = h / 2;
-    int d = row - mid;
-    if (d < 0) d = -d;
 
-    if (d >= mid) return 4;
-    if (d == mid - 1) return 2;
-    if (d == mid - 2) return 1;
-    return 0;
-}
-
-static void oled_draw_pill(int x, int y, int w, int h, uint8_t bg, uint8_t border) {
-    if (w <= 0 || h <= 0) return;
-    if (h < 7) {
-        oled_fill_rect(x, y, w, h, bg);
-        return;
-    }
-
-    for (int row = 0; row < h; row++) {
-        int inset = pill_row_inset(row, h);
-        int x1 = x + inset;
-        int x2 = x + w - inset - 1;
-        if (x2 < x1) continue;
-
-        for (int xx = x1; xx <= x2; xx++) {
-            oled_set_px(xx, y + row, bg);
-        }
-
-        if (row == 0 || row == h - 1) {
-            for (int xx = x1; xx <= x2; xx++) oled_set_px(xx, y + row, border);
-        } else {
-            oled_set_px(x1, y + row, border);
-            oled_set_px(x2, y + row, border);
-        }
-    }
-}
 
 static void oled_apply_brightness_to_buffer(uint8_t *buffer, size_t len, int brightness_percent) {
     if (!buffer || len == 0) return;
@@ -2021,30 +1997,29 @@ static int song_marquee_offset(int cycle_width, uint64_t started_ms) {
     return (int)(pixels % (uint64_t)cycle_width);
 }
 
-static void draw_song_metadata_line(const char *text, uint64_t started_ms) {
+static void draw_song_metadata_line(const char *text, uint64_t started_ms, int min_x) {
     if (!text || !*text) return;
 
-    int width = text5x7_width(text, 1);
-    int clip_x1 = SONG_METADATA_X + SONG_METADATA_W;
+    int clip_x0 = clamp_int(min_x, 0, OLED_W - 3);
+    int clip_x1 = CLOCK_RIGHT_X;
+    int available = clip_x1 - clip_x0;
+    if (available <= 0) return;
 
-    /* Keep metadata still and centred when the full Title - Artist fits. */
-    if (width <= SONG_METADATA_W) {
-        int x = SONG_METADATA_X + (SONG_METADATA_W - width) / 2;
-        draw_text5x7_clipped(x, OLED_H - 8, text, 11,
-                             SONG_METADATA_X, clip_x1);
+    int width = text5x7_width(text, 1);
+    if (width <= available) {
+        int x = clip_x0 + (available - width) / 2;
+        draw_text5x7_clipped(x, CLOCK_FOOTER_TEXT_Y, text, 11,
+                             clip_x0, clip_x1);
         return;
     }
 
-    int cycle_width = SONG_METADATA_W + width + SONG_SCROLL_GAP_PX;
+    int cycle_width = available + width + SONG_SCROLL_GAP_PX;
     int x = clip_x1 - song_marquee_offset(cycle_width, started_ms);
-
-    /* Overflowing metadata enters from the right, moves left, leaves fully,
-       then repeats after the configured blank gap. */
-    draw_text5x7_clipped(x, OLED_H - 8, text, 11,
-                         SONG_METADATA_X, clip_x1);
+    draw_text5x7_clipped(x, CLOCK_FOOTER_TEXT_Y, text, 11,
+                         clip_x0, clip_x1);
     x += cycle_width;
-    draw_text5x7_clipped(x, OLED_H - 8, text, 11,
-                         SONG_METADATA_X, clip_x1);
+    draw_text5x7_clipped(x, CLOCK_FOOTER_TEXT_Y, text, 11,
+                         clip_x0, clip_x1);
 }
 
 static void draw_version_corner(void) {
@@ -2055,139 +2030,99 @@ static void draw_version_corner(void) {
 }
 
 
-static int wifi_connected_kernel(void) {
-    char line[256];
+static int read_wlan0_ipv4_octet(unsigned int *last_octet) {
+    if (last_octet) *last_octet = 0;
 
-    FILE *fp = fopen("/sys/class/net/wlan0/operstate", "r");
-    if (fp) {
-        if (fgets(line, sizeof(line), fp)) {
-            line[strcspn(line, "\r\n")] = '\0';
-            fclose(fp);
-            if (strcmp(line, "up") == 0) return 1;
-            if (strcmp(line, "down") == 0 || strcmp(line, "dormant") == 0 ||
-                strcmp(line, "notpresent") == 0) return 0;
-        } else {
-            fclose(fp);
-        }
+    FILE *carrier = fopen("/sys/class/net/wlan0/carrier", "r");
+    int carrier_up = 0;
+    if (!carrier || fscanf(carrier, "%d", &carrier_up) != 1 || carrier_up != 1) {
+        if (carrier) fclose(carrier);
+        return 0;
+    }
+    fclose(carrier);
+
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return 0;
+
+    struct ifreq request;
+    memset(&request, 0, sizeof(request));
+    safe_str(request.ifr_name, sizeof(request.ifr_name), "wlan0");
+    if (ioctl(fd, SIOCGIFFLAGS, &request) != 0 ||
+        !(request.ifr_flags & IFF_UP) ||
+        (request.ifr_flags & IFF_LOOPBACK)) {
+        close(fd);
+        return 0;
     }
 
-    fp = fopen("/proc/net/wireless", "r");
-    if (!fp) return 0;
-
-    int connected = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        char *name = strstr(line, "wlan0:");
-        if (!name) continue;
-
-        char *colon = strchr(name, ':');
-        if (!colon) break;
-
-        unsigned int status = 0;
-        double link = 0.0;
-        if (sscanf(colon + 1, " %x %lf", &status, &link) >= 2 && link > 0.0) {
-            connected = 1;
-        }
-        break;
+    memset(&request, 0, sizeof(request));
+    safe_str(request.ifr_name, sizeof(request.ifr_name), "wlan0");
+    if (ioctl(fd, SIOCGIFADDR, &request) != 0) {
+        close(fd);
+        return 0;
     }
+    close(fd);
 
-    fclose(fp);
-    return connected;
+    const struct sockaddr_in *address = (const struct sockaddr_in *)&request.ifr_addr;
+    uint32_t host = ntohl(address->sin_addr.s_addr);
+    if (host == 0 || (host >> 24) == 127) return 0;
+
+    if (last_octet) *last_octet = host & 0xffu;
+    return 1;
 }
 
-static int wifi_connected_cached(void) {
-    static pthread_mutex_t wifi_lock = PTHREAD_MUTEX_INITIALIZER;
-    static int cached_connected = -1;
-    static time_t last_read = 0;
-    time_t now = time(NULL);
+static int footer_wifi_connected(unsigned int *last_octet) {
+    static uint64_t last_check_ms = 0;
+    static int cached_connected = 0;
+    static unsigned int cached_octet = 0;
+    uint64_t now_ms = monotonic_millis();
 
-    pthread_mutex_lock(&wifi_lock);
-    if (cached_connected < 0 || now - last_read >= 60) {
-        cached_connected = wifi_connected_kernel();
-        last_read = now;
-    }
-    int connected = cached_connected;
-    pthread_mutex_unlock(&wifi_lock);
-    return connected;
-}
-
-static void draw_wifi_icon_small(int x, int y, uint8_t c) {
-    static const uint16_t rows[7] = {
-        0x07C, /*  .#####.  */
-        0x082, /* #.....#  */
-        0x038, /*  .###.   */
-        0x044, /* .#...#.  */
-        0x010, /*   .#.    */
-        0x028, /*  .#.#.   */
-        0x010  /*   .#.    */
-    };
-
-    for (int row = 0; row < 7; row++) {
-        for (int col = 0; col < 9; col++) {
-            if (rows[row] & (1 << (8 - col))) {
-                oled_set_px(x + col, y + row, c);
-            }
-        }
-    }
-}
-
-static void draw_music_note_icon_small(int x, int y, uint8_t c) {
-    /* Simple 7x9 eighth-note style icon, OLED-safe at 1px strokes. */
-    for (int yy = 0; yy < 7; yy++) oled_set_px(x + 4, y + yy, c);
-    for (int xx = 4; xx <= 7; xx++) oled_set_px(x + xx, y, c);
-    for (int xx = 5; xx <= 8; xx++) oled_set_px(x + xx, y + 1, c);
-    oled_set_px(x + 8, y + 2, c);
-
-    oled_set_px(x + 1, y + 6, c);
-    oled_set_px(x + 2, y + 5, c);
-    oled_set_px(x + 3, y + 5, c);
-    oled_set_px(x + 4, y + 6, c);
-    oled_set_px(x + 3, y + 7, c);
-    oled_set_px(x + 2, y + 7, c);
-}
-
-static void draw_status_pills(int alarm_on, int alarm_active, int alarm_volume_percent) {
-    int connected = wifi_connected_cached();
-
-    const int pill_h = CLOCK_STATUS_PILL_H;
-    const int pad_x = 5;
-    const int icon_w = 9;
-    const int icon_pill_w = icon_w + pad_x * 2;
-    const int pill_gap = 3;
-    const int bottom_y = OLED_H - pill_h;
-
-    /* Bottom-left status group. Wi-Fi first, alarm/music immediately to its right.
-       Keeping all status pills left leaves the clock/date zone clean. */
-    int wifi_x = 2;
-    int wifi_y = bottom_y;
-    oled_draw_pill(wifi_x, wifi_y, icon_pill_w, pill_h, connected ? 2 : 1, connected ? 8 : 5);
-    draw_wifi_icon_small(wifi_x + pad_x, wifi_y + 2, connected ? 15 : 6);
-
-    if (!connected) {
-        /* Small diagonal slash for disconnected state. */
-        for (int i = 0; i < 9; i++) {
-            oled_set_px(wifi_x + pad_x + i, wifi_y + 2 + i / 2, 9);
-        }
+    if (last_check_ms == 0 || now_ms - last_check_ms >= 1000u) {
+        cached_connected = read_wlan0_ipv4_octet(&cached_octet);
+        last_check_ms = now_ms;
     }
 
-    int next_x = wifi_x + icon_pill_w + pill_gap;
-    if (alarm_active) {
-        char label[12];
-        snprintf(label, sizeof(label), "%d%%", clamp_int(alarm_volume_percent, 0, 100));
-        int text_w = text5x7_width(label, 1);
-        int note_pill_w = pad_x + icon_w + 3 + text_w + pad_x;
-        if (next_x + note_pill_w < OLED_W - 2) {
-            oled_draw_pill(next_x, bottom_y, note_pill_w, pill_h, 2, 8);
-            draw_music_note_icon_small(next_x + pad_x, bottom_y + 2, 15);
-            draw_text5x7(next_x + pad_x + icon_w + 3, bottom_y + 2, 1, label, 15);
-        }
-    } else if (alarm_on) {
-        int note_pill_w = icon_w + pad_x * 2;
-        if (next_x + note_pill_w < OLED_W - 2) {
-            oled_draw_pill(next_x, bottom_y, note_pill_w, pill_h, 2, 8);
-            draw_music_note_icon_small(next_x + pad_x, bottom_y + 2, 15);
-        }
-    }
+    if (last_octet) *last_octet = cached_octet;
+    return cached_connected;
 }
+
+static int wifi_status_render_state(void) {
+    if (footer_wifi_connected(NULL)) return 2;
+    return ((monotonic_millis() / 500u) & 1u) ? 1 : 0;
+}
+
+static int footer_status_end_x(int alarm_on, int alarm_active) {
+    int x = CLOCK_STATUS_TEXT_X;
+    x += text5x7_width("W.000", 1);
+    x += text5x7_width(" | ", 1);
+    x += text5x7_width((alarm_on || alarm_active) ? "ALARM ON" : "ALARM OFF", 1);
+    return x + CLOCK_STATUS_TEXT_GAP;
+}
+
+static int draw_status_labels(int alarm_on, int alarm_active) {
+    const int y = CLOCK_FOOTER_TEXT_Y;
+    int x = CLOCK_STATUS_TEXT_X;
+    unsigned int last_octet = 0;
+    int connected = footer_wifi_connected(&last_octet);
+    int wifi_state = connected ? 2 : wifi_status_render_state();
+    char wifi_label[8];
+
+    if (connected)
+        snprintf(wifi_label, sizeof(wifi_label), "W.%03u", last_octet);
+    else
+        safe_str(wifi_label, sizeof(wifi_label), "W.OFF");
+
+    if (wifi_state != 0)
+        draw_text5x7(x, y, 1, wifi_label, connected ? 11 : 6);
+    x += text5x7_width("W.000", 1);
+
+    draw_text5x7(x, y, 1, " | ", 8);
+    x += text5x7_width(" | ", 1);
+
+    const char *alarm_label = (alarm_on || alarm_active) ? "ALARM ON" : "ALARM OFF";
+    draw_text5x7(x, y, 1, alarm_label, alarm_active ? 15 : 11);
+    return footer_status_end_x(alarm_on, alarm_active);
+}
+
 static void draw_startup_screen(void) {
     char name[64];
     pthread_mutex_lock(&g_state.lock);
@@ -2312,7 +2247,7 @@ static int font_cache_ensure_locked(const char *font_file, const char *font_path
 }
 
 
-static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px_size, int hour, int minute, int center_x, int show_leading_zero, uint8_t colon_level);
+static int draw_clock_truetype_time_fixed_right_aligned(const char *font_file, int px_size, int hour, int minute, int right_x, int show_leading_zero, uint8_t colon_level);
 static int clock_colon_blink_phase(void) {
     /* Simple 1-second blink: one second on, one second off. */
     time_t now = time(NULL);
@@ -2325,20 +2260,12 @@ static uint8_t clock_colon_blink_level(void) {
 }
 
 /*
-   Draw the main clock time using fixed slots.
-
-   This is deliberately different from normal centered text rendering. With
-   proportional TrueType fonts, "1:01" and "10:01" have different widths, so
-   the clock visibly jumps left/right. We reserve the full HH:MM layout every
-   time. For single-digit hours, the leading zero is drawn as black/invisible,
-   but it still occupies its slot:
-
-       visible 1:01 is laid out as invisible-0 + 1:01
-
-   Result: the left and right distances stay constant without shrinking the
-   font.
+   Draw the main clock time in fixed digit slots and anchor its visible right
+   edge to one display pixel. Proportional TrueType side bearings therefore do
+   not make the clock shift as the digits change. Single-digit 12-hour times use
+   H:MM; 24-hour times retain HH:MM.
 */
-static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px_size, int hour, int minute, int center_x, int show_leading_zero, uint8_t colon_level) {
+static int draw_clock_truetype_time_fixed_right_aligned(const char *font_file, int px_size, int hour, int minute, int right_x, int show_leading_zero, uint8_t colon_level) {
     if (!font_file || !*font_file) return -1;
 
     char font_path[512];
@@ -2413,11 +2340,10 @@ static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px
     else snprintf(time_text, sizeof(time_text), "%02d:%02d", hour, minute);
 
     /*
-       Centre the actual visible glyph bounds, not just the logical slot width.
+       Measure the actual visible glyph bounds, not just the logical slot width.
        Some TrueType fonts have uneven side bearings, especially around "1" and
-       ":". Slot-only centring can look too far left even when the math is
-       technically centred. Measuring the rendered bounds here keeps 1-digit and
-       2-digit 12-hour times visually centred while retaining fixed digit slots.
+       ":". Anchoring the measured right edge keeps every time aligned to the
+       same display pixel while retaining fixed digit slots.
     */
     int rel_min_x = 99999;
     int rel_max_x = -99999;
@@ -2442,16 +2368,14 @@ static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px
     }
 
     int start_x;
-    if (rel_max_x > rel_min_x) {
-        int visual_center_twice = rel_min_x + rel_max_x;
-        start_x = center_x - ((visual_center_twice + 1) / 2);
-    } else {
-        start_x = center_x - (total_w / 2);
-    }
+    if (rel_max_x > rel_min_x)
+        start_x = right_x - rel_max_x;
+    else
+        start_x = right_x - total_w;
 
     int text_h = max_y - min_y;
     const int time_band_top = 0;
-    const int time_band_bottom = OLED_H - 11; /* fixed date line lives below */
+    const int time_band_bottom = OLED_H - CLOCK_FOOTER_H; /* footer lives below */
     int top_y = ((OLED_H - text_h) / 2) + CLOCK_TIME_Y_OFFSET;
     if (top_y < time_band_top) top_y = time_band_top;
     if (top_y + text_h > time_band_bottom) top_y = time_band_bottom - text_h;
@@ -2499,103 +2423,93 @@ static int draw_clock_truetype_time_fixed_centered(const char *font_file, int px
 }
 
 
-static const char *date_ordinal_suffix(int day) {
-    int mod100 = day % 100;
-    if (mod100 >= 11 && mod100 <= 13) return "th";
 
-    switch (day % 10) {
-        case 1: return "st";
-        case 2: return "nd";
-        case 3: return "rd";
-        default: return "th";
+static void draw_date_right_aligned_culled(const struct tm *tmv, int min_x, int right_x) {
+    if (!tmv || right_x <= min_x) return;
+
+    static const char *days_full[] = {
+        "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"
+    };
+    static const char *days_short[] = {
+        "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"
+    };
+    static const char *months_full[] = {
+        "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+        "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"
+    };
+    static const char *months_short[] = {
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
+    };
+
+    int wday = clamp_int(tmv->tm_wday, 0, 6);
+    int mon = clamp_int(tmv->tm_mon, 0, 11);
+    int day = tmv->tm_mday;
+    int year = tmv->tm_year + 1900;
+
+    char candidates[4][96];
+    snprintf(candidates[0], sizeof(candidates[0]), "%s, %s %d %04d",
+             days_full[wday], months_full[mon], day, year);
+    snprintf(candidates[1], sizeof(candidates[1]), "%s, %s %d %04d",
+             days_short[wday], months_short[mon], day, year);
+    snprintf(candidates[2], sizeof(candidates[2]), "%s %d %04d",
+             months_short[mon], day, year);
+    snprintf(candidates[3], sizeof(candidates[3]), "%s %d",
+             months_short[mon], day);
+
+    int available = right_x - min_x;
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        int width = text5x7_width(candidates[i], 1);
+        if (width <= available) {
+            draw_text5x7(right_x - width, CLOCK_FOOTER_TEXT_Y, 1, candidates[i], 9);
+            return;
+        }
     }
 }
 
-static void format_long_date(const struct tm *tmv, char *out, size_t out_len) {
-    if (!tmv || !out || out_len == 0) return;
 
-    static const char *days[] = {
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
-    };
-    static const char *months[] = {
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    };
-
-    int wday = tmv->tm_wday;
-    int mon = tmv->tm_mon;
-    if (wday < 0 || wday > 6) wday = 0;
-    if (mon < 0 || mon > 11) mon = 0;
-
-    snprintf(
-        out,
-        out_len,
-        "%s, %s %d%s %04d",
-        days[wday],
-        months[mon],
-        tmv->tm_mday,
-        date_ordinal_suffix(tmv->tm_mday),
-        tmv->tm_year + 1900
-    );
-}
-
-static void draw_long_date_centered_at(const struct tm *tmv, const char *font_file, int center_x) {
-    (void)font_file;
-    if (!tmv) return;
-
-    char datestr[96];
-    format_long_date(tmv, datestr, sizeof(datestr));
-
-    /*
-       Keep the date/status text on the fixed 5x7 OLED font.
-       User-uploaded TrueType fonts are only used for the main time/message text.
-       This prevents tall fonts from clipping the date line.
-
-       The date is centred under the visible clock anchor, not the raw OLED
-       centre. With the invisible leading-zero trick, single-digit hours are
-       visually shifted right, so the date follows that perceived centre.
-    */
-    char upper[96];
-    size_t i = 0;
-    for (; datestr[i] && i + 1 < sizeof(upper); i++) {
-        upper[i] = (char)toupper((unsigned char)datestr[i]);
-    }
-    upper[i] = '\0';
-
-    int w = text5x7_width(upper, 1);
-    int x = center_x - (w / 2);
-    if (x < 0) x = 0;
-    if (x + w >= OLED_W) x = OLED_W - w - 1;
-    if (x < 0) x = 0;
-    draw_text5x7(x, OLED_H - 8, 1, upper, 9);
-}
-
-static void draw_clock_footer_contents(const struct tm *tmv, int center_x,
-                                       int alarm_on, int alarm_active, int alarm_volume_percent,
+static void draw_clock_footer_contents(const struct tm *tmv,
+                                       int alarm_on, int alarm_active,
                                        int audio_playing, int show_song_metadata, int story_playing,
                                        const char *audio_display, uint64_t scroll_started_ms) {
-    if (audio_playing && show_song_metadata && audio_display && audio_display[0])
-        draw_song_metadata_line(audio_display, scroll_started_ms);
-    else
-        draw_long_date_centered_at(tmv, NULL, center_x);
-
-    /* Story playback returns to the normal clock after the intro/title sequence,
-       but its small status pills stay hidden until the story ends. */
+    int content_min_x = CLOCK_STATUS_TEXT_X;
     if (!story_playing)
-        draw_status_pills(alarm_on, alarm_active, alarm_volume_percent);
+        content_min_x = draw_status_labels(alarm_on, alarm_active);
+
+    if (audio_playing && show_song_metadata && audio_display && audio_display[0])
+        draw_song_metadata_line(audio_display, scroll_started_ms, content_min_x);
+    else
+        draw_date_right_aligned_culled(tmv, content_min_x, CLOCK_RIGHT_X);
+
+    if (tmv) draw_seconds_position_line(tmv->tm_sec);
 }
+
 
 static int song_metadata_marquee_active(void) {
     int active = 0;
     uint64_t now_ms = monotonic_millis();
     pthread_mutex_lock(&g_state.lock);
     int show = g_state.show_song_metadata;
-    if (g_state.story_playing) show = now_ms < g_state.story_title_until_ms;
-    if (g_state.audio_playing && show && g_state.audio_display[0])
-        active = text5x7_width(g_state.audio_display, 1) > SONG_METADATA_W;
+    int story_playing = g_state.story_playing;
+    int alarm_on = 0;
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        if (g_state.alarms[i].enabled) {
+            alarm_on = 1;
+            break;
+        }
+    }
+    int alarm_active = g_state.alarm_active;
+    if (story_playing) show = now_ms < g_state.story_title_until_ms;
+    if (g_state.audio_playing && show && g_state.audio_display[0]) {
+        int min_x = story_playing ? CLOCK_STATUS_TEXT_X
+                                  : footer_status_end_x(alarm_on, alarm_active);
+        int available = CLOCK_RIGHT_X - min_x;
+        active = available > 0 && text5x7_width(g_state.audio_display, 1) > available;
+    }
     pthread_mutex_unlock(&g_state.lock);
     return active;
 }
+
 
 static void refresh_clock_footer(void) {
     time_t now = time(NULL);
@@ -2603,7 +2517,6 @@ static void refresh_clock_footer(void) {
     localtime_r(&now, &tmv);
     int alarm_on = 0;
     int alarm_active;
-    int alarm_volume_percent;
     int audio_playing;
     int show_song_metadata;
     int story_playing;
@@ -2618,7 +2531,6 @@ static void refresh_clock_footer(void) {
         }
     }
     alarm_active = g_state.alarm_active;
-    alarm_volume_percent = g_state.alarm_volume_percent;
     audio_playing = g_state.audio_playing;
     show_song_metadata = g_state.show_song_metadata;
     story_playing = g_state.story_playing;
@@ -2628,14 +2540,15 @@ static void refresh_clock_footer(void) {
     safe_str(audio_display, sizeof(audio_display), g_state.audio_display);
     pthread_mutex_unlock(&g_state.lock);
 
-    oled_fill_rect(0, OLED_H - CLOCK_STATUS_PILL_H, OLED_W, CLOCK_STATUS_PILL_H, 0);
-    int clock_center_x = (CLOCK_SIDE_WIDGET_X + CLOCK_SIDE_WIDGET_SIZE + OLED_W) / 2;
-    draw_clock_footer_contents(&tmv, clock_center_x, alarm_on, alarm_active,
-                               alarm_volume_percent, audio_playing, show_song_metadata,
+    oled_fill_rect(0, CLOCK_SECONDS_LINE_Y, OLED_W,
+                   OLED_H - CLOCK_SECONDS_LINE_Y, 0);
+    draw_clock_footer_contents(&tmv, alarm_on, alarm_active,
+                               audio_playing, show_song_metadata,
                                story_playing, audio_display, scroll_started_ms);
     (void)oled_flush_region_bytes(0, OLED_ROW_BYTES - 1,
-                                  OLED_H - CLOCK_STATUS_PILL_H, OLED_H - 1);
+                                  CLOCK_SECONDS_LINE_Y, OLED_H - 1);
 }
+
 
 static int image_raw_pixel(const uint8_t *raw, int x, int y) {
     if (!raw || x < 0 || y < 0 || x >= MP_IMAGE_WIDTH || y >= MP_IMAGE_HEIGHT) return 0;
@@ -2810,7 +2723,7 @@ static void draw_story_mode_screen(const char *message) {
         draw_text5x7((OLED_W - missing_w) / 2, 25, 1, missing, 8);
     }
 
-    oled_fill_rect(0, OLED_H - CLOCK_STATUS_PILL_H, OLED_W, CLOCK_STATUS_PILL_H, 0);
+    oled_fill_rect(0, OLED_H - CLOCK_FOOTER_H, OLED_W, CLOCK_FOOTER_H, 0);
     char text[STORY_MESSAGE_MAX];
     safe_str(text, sizeof(text), message && *message ? message : "STORY MODE!");
     for (size_t i = 0; text[i]; i++) text[i] = (char)toupper((unsigned char)text[i]);
@@ -2841,7 +2754,6 @@ static void draw_clock_screen(void) {
     }
     int oled_font = g_state.oled_font;
     int alarm_active = g_state.alarm_active;
-    int alarm_volume_percent = g_state.alarm_volume_percent;
     int audio_playing = g_state.audio_playing;
     int show_song_metadata = g_state.show_song_metadata;
     int story_playing = g_state.story_playing;
@@ -2885,13 +2797,10 @@ static void draw_clock_screen(void) {
 
     int bedtime = is_bedtime_now();
     int image_x = CLOCK_SIDE_WIDGET_X;
-    /* Keep the image visually centered in the usable area above the bottom status pills.
-       The small negative nudge compensates for most image art having more visual weight
-       in the lower half. */
-    int image_area_h = OLED_H - CLOCK_STATUS_PILL_H;
+    /* Keep the image visually centered in the usable area above the footer. */
+    int image_area_h = OLED_H - CLOCK_FOOTER_H;
     int image_y = ((image_area_h - CLOCK_SIDE_WIDGET_SIZE) / 2) + CLOCK_IMAGE_Y_NUDGE;
-    int image_right = image_x + CLOCK_SIDE_WIDGET_SIZE;
-    int clock_center_x = (image_right + OLED_W) / 2;
+    const int clock_right_x = CLOCK_RIGHT_X;
     char random_image_file[IMAGE_FILE_MAX];
     if (bedtime) {
         if (sticky_image_file(1, random_image_file, sizeof(random_image_file)) == 0) {
@@ -2905,7 +2814,7 @@ static void draw_clock_screen(void) {
 
     int used_ttf = 0;
     if (oled_font_file[0]) {
-        if (draw_clock_truetype_time_fixed_centered(oled_font_file, clock_font_size, hour, minute, clock_center_x, clock_24h_mode, colon_level) == 0) used_ttf = 1;
+        if (draw_clock_truetype_time_fixed_right_aligned(oled_font_file, clock_font_size, hour, minute, clock_right_x, clock_24h_mode, colon_level) == 0) used_ttf = 1;
     }
 
     if (!used_ttf && (oled_font == 2 || oled_font == 3)) {
@@ -2917,7 +2826,7 @@ static void draw_clock_screen(void) {
         int colon_w = sx + (bold ? 1 : 0);
         int visible_hour_digits = (clock_24h_mode || h1 > 0) ? 2 : 1;
         int total_w = digit_w * (visible_hour_digits + 2) + gap * (visible_hour_digits + 2) + colon_w;
-        int x = clock_center_x - (total_w / 2);
+        int x = clock_right_x - total_w;
         int y = 0;
 
         if (visible_hour_digits == 2) {
@@ -2938,7 +2847,7 @@ static void draw_clock_screen(void) {
         int t = (oled_font == 1) ? 3 : 4;
         int visible_hour_digits = (clock_24h_mode || h1 > 0) ? 2 : 1;
         int total_w = (visible_hour_digits == 2) ? 126 : 97;
-        int x = clock_center_x - (total_w / 2);
+        int x = clock_right_x - total_w;
 
         if (visible_hour_digits == 2) {
             draw_seg_digit(x, y, w, h, t, h1, 15);
@@ -2953,12 +2862,13 @@ static void draw_clock_screen(void) {
         draw_seg_digit(x, y, w, h, t, m2, 15);
     }
 
-    draw_clock_footer_contents(&tmv, clock_center_x, alarm_on, alarm_active,
-                               alarm_volume_percent, audio_playing, show_song_metadata,
+    draw_clock_footer_contents(&tmv, alarm_on, alarm_active,
+                               audio_playing, show_song_metadata,
                                story_playing, audio_display, audio_scroll_started_ms);
 
     /*
-       The clock screen contains a 54x54 image beside the time, a blinking colon, bottom-left Wi-Fi/alarm status group. On SSD1322 modules,
+       The clock screen contains a 54x54 image beside the right-aligned time,
+       a blinking colon, and a single-baseline footer. On SSD1322 modules,
        small partial updates around packed 4-bit graphics can occasionally leave
        edge noise, so a full flush is the cleaner and safer choice.
     */
@@ -5677,9 +5587,11 @@ int main(void) {
     }
 
     int last_min = -1;
+    int last_sec = -1;
     int last_mode = -1;
     int last_colon_phase = -1;
     int last_story_phase = -1;
+    int last_wifi_status_state = -1;
     uint64_t last_diagnostic_refresh_ms = 0;
     while (g_running) {
         check_alarm();
@@ -5748,14 +5660,19 @@ int main(void) {
                 localtime_r(&now, &tmv);
                 int colon_phase = clock_colon_blink_phase();
                 int story_phase = story_display_phase();
+                int wifi_status_state = wifi_status_render_state();
                 marquee_active = song_metadata_marquee_active();
-                if (dirty || mode != last_mode || tmv.tm_min != last_min || colon_phase != last_colon_phase ||
-                    story_phase != last_story_phase || clock_image_refresh_due()) {
+                if (dirty || mode != last_mode || tmv.tm_min != last_min || tmv.tm_sec != last_sec ||
+                    colon_phase != last_colon_phase || story_phase != last_story_phase ||
+                    clock_image_refresh_due()) {
                     last_min = tmv.tm_min;
+                    last_sec = tmv.tm_sec;
                     last_colon_phase = colon_phase;
                     last_story_phase = story_phase;
+                    last_wifi_status_state = wifi_status_state;
                     draw_clock_screen();
-                } else if (marquee_active) {
+                } else if (marquee_active || wifi_status_state != last_wifi_status_state) {
+                    last_wifi_status_state = wifi_status_state;
                     refresh_clock_footer();
                 }
             } else if (mode == 1) {
